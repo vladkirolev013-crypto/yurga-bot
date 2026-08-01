@@ -11,9 +11,8 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN)
 
-# === КТО МОДЕРАТОР (укажи свои ID и ID напарника) ===
-MODERATOR_IDS = [8746212340]  # ЗАМЕНИ НА РЕАЛЬНЫЕ ID
-# Как узнать свой ID: напиши боту @userinfobot
+# === ЗАМЕНИ НА РЕАЛЬНЫЕ ID ТЕБЯ И НАПАРНИКА ===
+MODERATOR_IDS = [8746212340]  # <-- СЮДА ВСТАВЬ СВОИ ID
 
 # === БАЗА ДАННЫХ ===
 def init_db():
@@ -143,9 +142,6 @@ def get_workers():
     conn.close()
     return [r[0] for r in rows]
 
-def get_moderators():
-    return MODERATOR_IDS
-
 def add_balance(user_id, amount):
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
@@ -179,21 +175,19 @@ def get_worker_rating(worker_id):
 # === УВЕДОМЛЕНИЯ ===
 def notify_workers_and_moderators(order_id, title, price, creator_name):
     workers = get_workers()
-    moderators = get_moderators()
     text = f"🔔 Новый заказ!\n\nНазвание: {title}\nЦена: {price}₽\nЗаказчик: {creator_name}\n\nЧтобы откликнуться, используй кнопки в меню."
-
     for w in workers:
         try:
             bot.send_message(w, text)
         except:
             pass
-    for m in moderators:
+    for m in MODERATOR_IDS:
         try:
             bot.send_message(m, f"🛡️ Модератор: новый заказ!\n{text}")
         except:
             pass
 
-# === ГЛАВНОЕ МЕНЮ (КНОПКИ) ===
+# === ГЛАВНОЕ МЕНЮ ===
 def main_menu(user_id):
     role = get_user_role(user_id)
     markup = InlineKeyboardMarkup(row_width=2)
@@ -230,7 +224,6 @@ def send_welcome(message):
         conn.commit()
     conn.close()
 
-    # Показываем выбор роли (без модератора для посторонних)
     markup = InlineKeyboardMarkup(row_width=2)
     btn1 = InlineKeyboardButton("👷 Работник", callback_data="role_worker")
     btn2 = InlineKeyboardButton("🏢 Заказчик", callback_data="role_customer")
@@ -256,31 +249,28 @@ def role_callback(call):
         "customer": "🏢 Заказчик",
         "moderator": "🛡️ Модератор"
     }
-    # Проверка: если модератор — разрешено только из списка
     if role == 'moderator' and user_id not in MODERATOR_IDS:
-        bot.answer_callback_query(call.id, "❌ У тебя нет прав модератора.")
+        bot.answer_callback_query(call.id, "❌ Нет прав.")
         return
-
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
     c.execute("UPDATE users SET role = ? WHERE user_id = ?", (role, user_id))
     conn.commit()
     conn.close()
-
     bot.answer_callback_query(call.id, f"✅ Ты выбрал роль: {roles_map[role]}")
     bot.edit_message_text(
-        f"✅ Ты теперь {roles_map[role]}.\n\nИспользуй меню для действий.",
+        f"✅ Ты теперь {roles_map[role]}.\n\nИспользуй меню.",
         chat_id=call.message.chat.id,
         message_id=call.message.message_id
     )
-    # Показываем меню
     bot.send_message(call.message.chat.id, "📱 Главное меню:", reply_markup=main_menu(user_id))
 
-# === ОБРАБОТКА КНОПОК МЕНЮ ===
+# === ОБРАБОТЧИК ВСЕХ КНОПОК МЕНЮ ===
 @bot.callback_query_handler(func=lambda call: call.data.startswith('menu_'))
 def menu_callback(call):
     user_id = call.from_user.id
     action = call.data.split('_')[1]
+    bot.answer_callback_query(call.id)
 
     if action == 'orders':
         orders = get_active_orders()
@@ -295,31 +285,30 @@ def menu_callback(call):
     elif action == 'profile':
         data = get_user_data(user_id)
         if not data:
-            bot.send_message(call.message.chat.id, "❌ Ошибка профиля. Напиши /start")
+            bot.send_message(call.message.chat.id, "❌ Ошибка профиля.")
             return
         username, first_name, role, balance, completed, rating = data
         role_map = {"worker": "👷 Работник", "customer": "🏢 Заказчик", "moderator": "🛡️ Модератор"}
-        text = (f"👤 Профиль\n\n"
-                f"Имя: {first_name}\n"
-                f"Username: @{username}\n"
-                f"Роль: {role_map.get(role, role)}\n"
-                f"💰 Баланс: {balance}₽\n"
-                f"✅ Выполнено заказов: {completed}\n"
-                f"⭐ Рейтинг: {rating:.1f}")
+        text = (f"👤 Профиль\n\nИмя: {first_name}\nUsername: @{username}\nРоль: {role_map.get(role, role)}\n💰 Баланс: {balance}₽\n✅ Выполнено: {completed}\n⭐ Рейтинг: {rating:.1f}")
         bot.send_message(call.message.chat.id, text)
 
     elif action == 'new_order':
-        # Запускаем создание заказа
-        msg = bot.send_message(call.message.chat.id, "Название заказа:")
+        role = get_user_role(user_id)
+        if role != 'customer':
+            bot.send_message(call.message.chat.id, "❌ Только для заказчиков.")
+            return
+        msg = bot.send_message(call.message.chat.id, "Введите название заказа (или /cancel для отмены):")
         bot.register_next_step_handler(msg, get_order_title, user_id)
 
     elif action == 'take':
-        # Запрос ID заказа
-        msg = bot.send_message(call.message.chat.id, "Введи ID заказа, на который хочешь откликнуться (из списка /orders):")
+        role = get_user_role(user_id)
+        if role != 'worker':
+            bot.send_message(call.message.chat.id, "❌ Только для работников.")
+            return
+        msg = bot.send_message(call.message.chat.id, "Введите ID заказа (из /orders):")
         bot.register_next_step_handler(msg, take_order_by_id, user_id)
 
     elif action == 'moderate':
-        # Модераторская панель
         if user_id not in MODERATOR_IDS:
             bot.send_message(call.message.chat.id, "❌ Нет прав.")
             return
@@ -332,49 +321,63 @@ def menu_callback(call):
             status = o[4]
             executor = o[5] if o[5] else "не назначен"
             text += f"ID: {o[0]}, Название: {o[2]}, Статус: {status}, Исполнитель: {executor}\n"
-        text += "\nЧтобы отметить заказ выполненным, нажми кнопку ниже."
+        text += "\nЧтобы завершить заказ, нажми кнопку ниже."
         markup = InlineKeyboardMarkup()
-        btn = InlineKeyboardButton("✅ Отметить выполненным", callback_data="mod_complete")
+        btn = InlineKeyboardButton("✅ Завершить заказ", callback_data="mod_complete")
         markup.add(btn)
         bot.send_message(call.message.chat.id, text, reply_markup=markup)
 
-    elif action == 'complete':
-        # Обработка завершения заказа (вызывается из модераторской панели)
-        msg = bot.send_message(call.message.chat.id, "Введи ID заказа для завершения:")
-        bot.register_next_step_handler(msg, complete_order_by_id, user_id)
-
+# === ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КНОПКИ "ЗАВЕРШИТЬ ЗАКАЗ" (модератор) ===
+@bot.callback_query_handler(func=lambda call: call.data == 'mod_complete')
+def mod_complete_callback(call):
+    user_id = call.from_user.id
+    if user_id not in MODERATOR_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет прав.")
+        return
     bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, "Введите ID заказа для завершения:")
+    bot.register_next_step_handler(msg, complete_order_by_id, user_id)
 
 # === СОЗДАНИЕ ЗАКАЗА (шаги) ===
 def get_order_title(message, user_id):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено.")
+        return
     title = message.text
-    msg = bot.send_message(message.chat.id, "Описание:")
+    msg = bot.send_message(message.chat.id, "Введите описание (или /cancel):")
     bot.register_next_step_handler(msg, get_order_description, user_id, title)
 
 def get_order_description(message, user_id, title):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено.")
+        return
     description = message.text
-    msg = bot.send_message(message.chat.id, "Цена (руб):")
+    msg = bot.send_message(message.chat.id, "Введите цену (только число):")
     bot.register_next_step_handler(msg, get_order_price, user_id, title, description)
 
 def get_order_price(message, user_id, title, description):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено.")
+        return
     try:
         price = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введи число.")
+        bot.reply_to(message, "❌ Это не число. Попробуйте ещё раз.")
+        msg = bot.send_message(message.chat.id, "Цена (руб):")
+        bot.register_next_step_handler(msg, get_order_price, user_id, title, description)
         return
-    msg = bot.send_message(message.chat.id, "Контакты (телефон, Telegram):")
+    msg = bot.send_message(message.chat.id, "Введите контакты (телефон, Telegram) или /cancel:")
     bot.register_next_step_handler(msg, get_order_contacts, user_id, title, description, price)
 
 def get_order_contacts(message, user_id, title, description, price):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено.")
+        return
     contacts = message.text
     order_id = save_order(user_id, title, description, price, contacts)
     bot.reply_to(message, f"✅ Заказ создан! ID: {order_id}")
-
-    # Уведомления
     creator_name = message.from_user.first_name or "Пользователь"
     notify_workers_and_moderators(order_id, title, price, creator_name)
-
-    # Показать меню
     bot.send_message(message.chat.id, "📱 Главное меню:", reply_markup=main_menu(user_id))
 
 # === ОТКЛИК ПО ID ===
@@ -382,14 +385,8 @@ def take_order_by_id(message, user_id):
     try:
         order_id = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введи число.")
+        bot.reply_to(message, "❌ Введите число.")
         return
-
-    role = get_user_role(user_id)
-    if role != 'worker':
-        bot.reply_to(message, "❌ Только работники могут откликаться.")
-        return
-
     order = get_order(order_id)
     if not order:
         bot.reply_to(message, "❌ Заказ не найден.")
@@ -397,21 +394,17 @@ def take_order_by_id(message, user_id):
     if order[5] != 'active':
         bot.reply_to(message, "❌ Заказ уже не активен.")
         return
-
     responses = get_responses_for_order(order_id)
     if any(r[0] == user_id for r in responses):
         bot.reply_to(message, "❌ Ты уже откликнулся.")
         return
-
     add_response(order_id, user_id)
     bot.reply_to(message, "✅ Отклик отправлен!")
-
     creator_id = order[1]
     try:
         bot.send_message(creator_id, f"🔔 На заказ «{order[2]}» откликнулся @{message.from_user.username or 'без username'}.")
     except:
         pass
-
     bot.send_message(message.chat.id, "📱 Главное меню:", reply_markup=main_menu(user_id))
 
 # === ЗАВЕРШЕНИЕ ЗАКАЗА (модератор) ===
@@ -419,13 +412,8 @@ def complete_order_by_id(message, moderator_id):
     try:
         order_id = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введи число.")
+        bot.reply_to(message, "❌ Введите число.")
         return
-
-    if moderator_id not in MODERATOR_IDS:
-        bot.reply_to(message, "❌ Нет прав.")
-        return
-
     order = get_order(order_id)
     if not order:
         bot.reply_to(message, "❌ Заказ не найден.")
@@ -433,12 +421,10 @@ def complete_order_by_id(message, moderator_id):
     if order[5] != 'active':
         bot.reply_to(message, "❌ Заказ уже завершён.")
         return
-
     responses = get_responses_for_order(order_id)
     if not responses:
         bot.reply_to(message, "❌ На заказ никто не откликнулся.")
         return
-
     executor_id = responses[0][0]
     price = order[4]
     commission = 50
@@ -448,7 +434,7 @@ def complete_order_by_id(message, moderator_id):
     add_balance(executor_id, worker_payment)
     increment_completed(executor_id)
 
-    # Запрос оценки заказчику
+    # Запрос оценки
     try:
         markup = InlineKeyboardMarkup()
         for i in range(1, 6):
@@ -495,8 +481,7 @@ def rate_callback(call):
 # === /help ===
 @bot.message_handler(commands=['help'])
 def send_help(message):
-    user_id = message.from_user.id
-    bot.send_message(message.chat.id, "📱 Используй меню для всех действий.", reply_markup=main_menu(user_id))
+    bot.send_message(message.chat.id, "📱 Используй меню.", reply_markup=main_menu(message.from_user.id))
 
 # === ЗАПУСК ===
 print("✅ Бот запущен и слушает...")
