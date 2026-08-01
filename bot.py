@@ -12,7 +12,7 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # === КТО МОДЕРАТОР (укажи свои ID и ID напарника) ===
-MODERATOR_IDS = [123456789, 987654321]  # ЗАМЕНИ НА РЕАЛЬНЫЕ ID
+MODERATOR_IDS = [8746212340]  # ЗАМЕНИ НА РЕАЛЬНЫЕ ID
 # Как узнать свой ID: напиши боту @userinfobot
 
 # === БАЗА ДАННЫХ ===
