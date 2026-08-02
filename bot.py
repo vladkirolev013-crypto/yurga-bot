@@ -244,23 +244,10 @@ def role_choice(message):
     else:
         bot.reply_to(message, "✅ Вы модератор.", reply_markup=moderator_kb())
 
-# ===== НАЗАД =====
+# ===== НАЗАД (всегда возвращает в главное меню) =====
 @bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
 def back(message):
-    uid = message.from_user.id
-    user = get_user(uid)
-    if not user:
-        bot.reply_to(message, "Начните с /start", reply_markup=main_kb())
-        return
-    role = user[7]
-    if role == 'rabotnik':
-        bot.reply_to(message, "Меню работника:", reply_markup=worker_kb())
-    elif role == 'zakazchik':
-        bot.reply_to(message, "Меню заказчика:", reply_markup=customer_kb())
-    elif role == 'moderator':
-        bot.reply_to(message, "Меню модератора:", reply_markup=moderator_kb())
-    else:
-        bot.reply_to(message, "Главное меню:", reply_markup=main_kb())
+    bot.reply_to(message, "Главное меню:", reply_markup=main_kb())
 
 # ===== РЕГИСТРАЦИЯ =====
 reg_data = {}
@@ -367,7 +354,6 @@ def free_orders(message):
     if user[11] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    # Модератор может смотреть заказы без регистрации
     if uid not in MODERATOR_IDS and user[10] == 0:
         bot.reply_to(message, "❌ Пройдите регистрацию (кнопка 'Регистрация').")
         return
@@ -405,7 +391,6 @@ def take_order(message):
     if user[0] in assigned:
         bot.reply_to(message, "❌ Вы уже взяли этот заказ.")
         return
-    # Модератор может брать заказы без регистрации
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
     c.execute("INSERT INTO assignments (order_id, user_id, payout) VALUES (?, ?, ?)", (order_id, user[0], order[8]))
@@ -495,7 +480,6 @@ def create_order_start(message):
     if user[11] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    # Модератор может создавать заказы без регистрации
     if uid not in MODERATOR_IDS and user[10] == 0:
         bot.reply_to(message, "❌ Пройдите регистрацию (кнопка 'Регистрация').")
         return
@@ -533,7 +517,6 @@ def get_order_people(message, uid):
     total = hours * people * 500
     commission = hours * people * 50
     payout = (total - commission) // people
-    # Для модератора имя по умолчанию, если не заполнено
     zakazchik_name = user[2] if user[2] else "Модератор"
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
