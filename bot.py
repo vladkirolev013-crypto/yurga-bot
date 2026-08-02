@@ -335,14 +335,15 @@ def get_customer_name(message, uid):
 
 def get_customer_phone(message, uid):
     reg_data[uid]['phone'] = message.text
-    msg = bot.reply_to(message, "Введите ваш район (город, улицу):")
-    bot.register_next_step_handler(msg, finish_customer_reg, uid)
+    # Раньше здесь был вопрос о районе, теперь пропускаем
+    finish_customer_reg(message, uid)   # сразу завершаем
 
 def finish_customer_reg(message, uid):
+    # district не заполняем, оставляем NULL
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
-    c.execute("UPDATE users SET name=?, phone=?, district=? WHERE telegram_id=?",
-              (reg_data[uid]['name'], reg_data[uid]['phone'], message.text, uid))
+    c.execute("UPDATE users SET name=?, phone=? WHERE telegram_id=?",
+              (reg_data[uid]['name'], reg_data[uid]['phone'], uid))
     conn.commit()
     conn.close()
     del reg_data[uid]
