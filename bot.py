@@ -75,7 +75,7 @@ def get_order(oid):
 def get_open_orders():
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
-    c.execute("SELECT * FROM orders WHERE status = 'open' ORDER BY created_at DESC")
+    c.execute("SELECT id, payout_per_person FROM orders WHERE status = 'open' ORDER BY created_at DESC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -83,7 +83,7 @@ def get_open_orders():
 def get_customer_orders(zakazchik_id):
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
-    c.execute("SELECT * FROM orders WHERE zakazchik_id = ? ORDER BY created_at DESC", (zakazchik_id,))
+    c.execute("SELECT id, total_sum, status FROM orders WHERE zakazchik_id = ? ORDER BY created_at DESC", (zakazchik_id,))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -91,7 +91,7 @@ def get_customer_orders(zakazchik_id):
 def get_worker_orders(user_id):
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
-    c.execute('''SELECT o.id, o.address, o.hours, o.people, o.total_sum, o.status, a.payout 
+    c.execute('''SELECT o.id, o.status, a.payout 
                  FROM assignments a JOIN orders o ON a.order_id = o.id 
                  WHERE a.user_id = ?''', (user_id,))
     rows = c.fetchall()
@@ -233,7 +233,6 @@ def role_choice(message):
         bot.reply_to(message, "❌ Нет прав.")
         return
     update_user(uid, 'role', role)
-    # Обновляем user для дальнейшего использования
     user = get_user(uid)
     if role == 'rabotnik':
         bot.reply_to(message, "✅ Вы работник.", reply_markup=worker_kb())
@@ -355,7 +354,7 @@ def free_orders(message):
         bot.reply_to(message, "📭 Нет заказов.")
         return
     for o in orders:
-        text = f"🆔 Заказ #{o[0]}\n📍 {o[3]}\n⏱ {o[4]}ч, 👥 {o[5]}чел\n💰 {o[6]}₽, 💵 {o[8]}₽/чел"
+        text = f"🆔 Заказ #{o[0]}\n💵 Выплата: {o[1]} ₽"
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton(f"✅ Забрать #{o[0]}"))
         kb.row(KeyboardButton("⬅️ Назад"))
@@ -412,9 +411,9 @@ def my_payouts(message):
     total = 0
     text = "💰 Ваши выплаты:\n"
     for o in orders:
-        text += f"Заказ #{o[0]}: {o[1]}, {o[2]}ч, {o[3]}чел, выплата {o[6]}₽, статус {o[5]}\n"
-        if o[5] == 'completed':
-            total += o[6]
+        text += f"Заказ #{o[0]}: выплата {o[2]}₽, статус {o[1]}\n"
+        if o[1] == 'completed':
+            total += o[2]
     text += f"\n💰 Итого: {total}₽"
     bot.reply_to(message, text)
 
@@ -481,7 +480,6 @@ def get_order_people(message, uid):
         return
     user = get_user(uid)
     hours = order_data[uid]['hours']
-    address = order_data[uid]['address']
     total = hours * people * 500
     commission = hours * people * 50
     payout = (total - commission) // people
@@ -490,15 +488,15 @@ def get_order_people(message, uid):
     c = conn.cursor()
     c.execute('''INSERT INTO orders (zakazchik_id, zakazchik_name, address, hours, people, total_sum, commission, payout_per_person, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (user[0], name, address, hours, people, total, commission, payout, datetime.now().isoformat()))
+              (user[0], name, order_data[uid]['address'], hours, people, total, commission, payout, datetime.now().isoformat()))
     conn.commit()
     oid = c.lastrowid
     conn.close()
     del order_data[uid]
-    bot.reply_to(message, f"✅ Заказ #{oid} создан!\n📍 {address}\n⏱ {hours}ч, 👥 {people}чел\n💰 {total}₽\n💵 {payout}₽/чел\nКомиссия: {commission}₽", reply_markup=customer_kb())
+    bot.reply_to(message, f"✅ Заказ #{oid} создан! Сумма к оплате: {total} ₽", reply_markup=customer_kb())
     workers = get_workers()
     if workers:
-        text = f"🔔 Новый заказ!\n📍 {address}\n⏱ {hours}ч, 👥 {people}чел\n💵 {payout}₽/чел"
+        text = f"🔔 Новый заказ!\n🆔 #{oid}\n💵 Выплата: {payout} ₽"
         for w in workers:
             try:
                 bot.send_message(w, text)
@@ -517,8 +515,8 @@ def my_orders_customer(message):
         return
     for o in orders:
         status_map = {'open':'🟢 Открыт','in_progress':'🟡 В работе','completed':'✅ Завершён'}
-        text = f"🆔 Заказ #{o[0]}\n📍 {o[3]}\n⏱ {o[4]}ч, 👥 {o[5]}чел\n💰 {o[6]}₽\nСтатус: {status_map.get(o[9], o[9])}"
-        if o[9] in ('open', 'in_progress'):
+        text = f"🆔 Заказ #{o[0]}\nСумма: {o[1]} ₽\nСтатус: {status_map.get(o[2], o[2])}"
+        if o[2] in ('open', 'in_progress'):
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.row(KeyboardButton(f"✅ Завершить #{o[0]}"))
             kb.row(KeyboardButton("⬅️ Назад"))
