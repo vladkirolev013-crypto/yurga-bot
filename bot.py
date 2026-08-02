@@ -5,7 +5,7 @@ from datetime import datetime
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
-MODERATOR_IDS = [8746212340]  # ваш ID
+MODERATOR_IDS = [8746212340]
 bot = telebot.TeleBot(TOKEN)
 
 # -------- БАЗА ДАННЫХ --------
@@ -21,7 +21,7 @@ def init_db():
         initials TEXT,
         role TEXT,
         rating INTEGER DEFAULT 10,
-        on_shift INTEGER DEFAULT 0,
+        on_shift INTEGER DEFAULT 1,
         agreement_accepted INTEGER DEFAULT 0,
         blocked INTEGER DEFAULT 0
     )''')
@@ -106,7 +106,7 @@ def get_assignments(order_id):
     conn.close()
     return [r[0] for r in rows]
 
-def get_workers_on_shift():
+def get_workers():
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
     c.execute("SELECT telegram_id FROM users WHERE role = 'rabotnik' AND on_shift = 1 AND blocked = 0")
@@ -166,7 +166,7 @@ def worker_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📋 Свободные заказы"))
     kb.row(KeyboardButton("💰 Мои выплаты"), KeyboardButton("👤 Профиль"))
-    kb.row(KeyboardButton("🟢 На смене"), KeyboardButton("⬅️ Назад"))  # будет меняться на "🔴 Отдыхаю"
+    kb.row(KeyboardButton("⬅️ Назад"))
     return kb
 
 def customer_kb():
@@ -233,6 +233,8 @@ def role_choice(message):
         bot.reply_to(message, "❌ Нет прав.")
         return
     update_user(uid, 'role', role)
+    # Обновляем user для дальнейшего использования
+    user = get_user(uid)
     if role == 'rabotnik':
         bot.reply_to(message, "✅ Вы работник.", reply_markup=worker_kb())
     elif role == 'zakazchik':
@@ -260,8 +262,9 @@ def reg_start(message):
     if user[9] == 1:
         bot.reply_to(message, "✅ Вы уже зарегистрированы.")
         return
-    if user[6] not in ['rabotnik', 'zakazchik']:
-        bot.reply_to(message, "❌ Сначала выберите роль.")
+    role = user[6]
+    if role not in ('rabotnik', 'zakazchik'):
+        bot.reply_to(message, "❌ Сначала выберите роль через главное меню.")
         return
     reg_data[uid] = {}
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -430,26 +433,9 @@ def profile(message):
             f"Телефон: {user[3] or 'не указан'}\n"
             f"Роль: {role_names.get(user[6], user[6])}\n"
             f"Рейтинг: {user[7]}\n"
-            f"На смене: {'Да' if user[8] else 'Нет'}\n"
             f"Соглашение: {'Да' if user[9] else 'Нет'}\n"
             f"Блок: {'Да' if user[10] else 'Нет'}")
     bot.reply_to(message, text)
-
-@bot.message_handler(func=lambda m: m.text in ('🟢 На смене', '🔴 Отдыхаю'))
-def toggle_shift(message):
-    uid = message.from_user.id
-    user = get_user(uid)
-    if not user or user[6] != 'rabotnik':
-        return
-    if user[10] == 1:
-        bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
-        return
-    if message.text == '🟢 На смене':
-        update_user(uid, 'on_shift', 1)
-        bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb())
-    else:  # '🔴 Отдыхаю'
-        update_user(uid, 'on_shift', 0)
-        bot.reply_to(message, "🔴 Вы отдыхаете.", reply_markup=worker_kb())
 
 # -------- ЗАКАЗЧИК --------
 order_data = {}
@@ -510,7 +496,7 @@ def get_order_people(message, uid):
     conn.close()
     del order_data[uid]
     bot.reply_to(message, f"✅ Заказ #{oid} создан!\n📍 {address}\n⏱ {hours}ч, 👥 {people}чел\n💰 {total}₽\n💵 {payout}₽/чел\nКомиссия: {commission}₽", reply_markup=customer_kb())
-    workers = get_workers_on_shift()
+    workers = get_workers()
     if workers:
         text = f"🔔 Новый заказ!\n📍 {address}\n⏱ {hours}ч, 👥 {people}чел\n💵 {payout}₽/чел"
         for w in workers:
