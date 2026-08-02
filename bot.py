@@ -11,8 +11,8 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN)
 
-# === ЗАМЕНИ НА РЕАЛЬНЫЕ ID ТЕБЯ И НАПАРНИКА ===
-MODERATOR_IDS = [8746212340]  # <-- СЮДА ВСТАВЬ СВОИ ID
+# === ЗАМЕНИ НА СВОЙ ID И ID НАПАРНИКА ===
+MODERATOR_IDS = [8746212340]  # <-- ВСТАВЬ СВОИ ЦИФРЫ
 
 # === БАЗА ДАННЫХ ===
 def init_db():
@@ -164,18 +164,9 @@ def update_rating(worker_id, rating):
     conn.commit()
     conn.close()
 
-def get_worker_rating(worker_id):
-    conn = sqlite3.connect('rabota.db')
-    c = conn.cursor()
-    c.execute("SELECT rating, rating_count FROM users WHERE user_id = ?", (worker_id,))
-    row = c.fetchone()
-    conn.close()
-    return row if row else (0.0, 0)
-
-# === УВЕДОМЛЕНИЯ ===
 def notify_workers_and_moderators(order_id, title, price, creator_name):
     workers = get_workers()
-    text = f"🔔 Новый заказ!\n\nНазвание: {title}\nЦена: {price}₽\nЗаказчик: {creator_name}\n\nЧтобы откликнуться, используй кнопки в меню."
+    text = f"🔔 Новый заказ!\n\nНазвание: {title}\nЦена: {price}₽\nЗаказчик: {creator_name}\n\nЧтобы откликнуться, используй кнопки."
     for w in workers:
         try:
             bot.send_message(w, text)
@@ -327,7 +318,7 @@ def menu_callback(call):
         markup.add(btn)
         bot.send_message(call.message.chat.id, text, reply_markup=markup)
 
-# === ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КНОПКИ "ЗАВЕРШИТЬ ЗАКАЗ" (модератор) ===
+# === ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ "ЗАВЕРШИТЬ ЗАКАЗ" ===
 @bot.callback_query_handler(func=lambda call: call.data == 'mod_complete')
 def mod_complete_callback(call):
     user_id = call.from_user.id
@@ -338,7 +329,7 @@ def mod_complete_callback(call):
     msg = bot.send_message(call.message.chat.id, "Введите ID заказа для завершения:")
     bot.register_next_step_handler(msg, complete_order_by_id, user_id)
 
-# === СОЗДАНИЕ ЗАКАЗА (шаги) ===
+# === ФУНКЦИИ СОЗДАНИЯ ЗАКАЗА ===
 def get_order_title(message, user_id):
     if message.text == '/cancel':
         bot.reply_to(message, "❌ Отменено.")
@@ -434,7 +425,6 @@ def complete_order_by_id(message, moderator_id):
     add_balance(executor_id, worker_payment)
     increment_completed(executor_id)
 
-    # Запрос оценки
     try:
         markup = InlineKeyboardMarkup()
         for i in range(1, 6):
@@ -451,7 +441,6 @@ def complete_order_by_id(message, moderator_id):
 
     bot.reply_to(message, f"✅ Заказ #{order_id} завершён. Исполнитель получил {worker_payment}₽.")
 
-    # Проверка порога
     executor_balance = get_user_data(executor_id)[3]
     if executor_balance >= 5000:
         try:
@@ -459,7 +448,6 @@ def complete_order_by_id(message, moderator_id):
         except:
             pass
 
-    # Уведомление модераторам
     for m in MODERATOR_IDS:
         try:
             bot.send_message(m, f"🛡️ Заказ #{order_id} завершён модератором.")
@@ -477,6 +465,17 @@ def rate_callback(call):
     update_rating(worker_id, rating)
     bot.answer_callback_query(call.id, "✅ Спасибо за оценку!")
     bot.edit_message_text("⭐ Оценка сохранена.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+
+# === КОМАНДА /new_order (на случай, если кнопка не работает) ===
+@bot.message_handler(commands=['new_order'])
+def cmd_new_order(message):
+    user_id = message.from_user.id
+    role = get_user_role(user_id)
+    if role != 'customer':
+        bot.reply_to(message, "❌ Только для заказчиков.")
+        return
+    msg = bot.send_message(message.chat.id, "Введите название заказа (или /cancel):")
+    bot.register_next_step_handler(msg, get_order_title, user_id)
 
 # === /help ===
 @bot.message_handler(commands=['help'])
