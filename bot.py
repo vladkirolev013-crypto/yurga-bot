@@ -4,9 +4,9 @@ import time
 from datetime import datetime
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# ===== КОНФИГ =====
+# ===== ТОКЕН И ID МОДЕРАТОРА =====
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
-MODERATOR_IDS = [8746212340]  # твой ID
+MODERATOR_IDS = [8746212340]  # твой Telegram ID
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -275,7 +275,12 @@ def register_start(message):
     reg_data[uid] = {}
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
-    bot.send_message(message.chat.id, "📜 Чтобы продолжить, примите условия работы сервиса. Нажмите '✅ Принимаю' или '❌ Отмена'.", reply_markup=kb)
+    bot.send_message(message.chat.id, 
+        "📜 Для регистрации примите условия:\n"
+        "Сервис – посредник. Он гарантирует выплату (работникам) и возврат денег при неявке (заказчикам).\n"
+        "Сервис НЕ несёт ответственности за качество работы, травмы, порчу имущества, кражи.\n"
+        "Оплата наличными отменяет гарантии сервиса.\n\n"
+        "Нажмите '✅ Принимаю' или '❌ Отмена'.", reply_markup=kb)
 
 @bot.message_handler(func=lambda m: m.text in ['✅ Принимаю', '❌ Отмена'])
 def handle_agreement(message):
@@ -359,10 +364,10 @@ def free_orders(message):
         return
     orders = get_open_orders()
     if not orders:
-        bot.reply_to(message, "📭 Нет заказов.")
+        bot.reply_to(message, "📭 Нет свободных заказов.")
         return
     for o in orders:
-        text = f"🆔 Заказ #{o[0]}\n📍 {o[3]}\n⏱ {o[4]}ч\n👥 {o[5]}чел\n💰 {o[6]}₽\n💵 {o[8]}₽/чел"
+        text = f"🆔 Заказ #{o[0]}\n📍 {o[3]}\n⏱ {o[4]} ч\n👥 {o[5]} чел\n💰 {o[6]} ₽\n💵 {o[8]} ₽/чел"
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton(f"✅ Забрать #{o[0]}"))
         kb.row(KeyboardButton("⬅️ Назад"))
@@ -378,14 +383,14 @@ def take_order(message):
     try:
         order_id = int(message.text.split('#')[1])
     except:
-        bot.reply_to(message, "❌ Ошибка.")
+        bot.reply_to(message, "❌ Ошибка в номере заказа.")
         return
     order = get_order(order_id)
     if not order:
         bot.reply_to(message, "❌ Заказ не найден.")
         return
     if order[9] != 'open':
-        bot.reply_to(message, "❌ Заказ уже не актуален.")
+        bot.reply_to(message, "❌ Этот заказ уже не доступен.")
         return
     assigned = get_assignments(order_id)
     if user[0] in assigned:
@@ -402,7 +407,7 @@ def take_order(message):
         c.execute("UPDATE orders SET status = 'in_progress' WHERE id = ?", (order_id,))
         conn.commit()
         conn.close()
-        bot.reply_to(message, f"✅ Заказ #{order_id} укомплектован!")
+        bot.reply_to(message, f"✅ Заказ #{order_id} полностью укомплектован!")
         try:
             bot.send_message(order[1], f"🔔 Заказ #{order_id} полностью укомплектован.")
         except:
@@ -441,7 +446,14 @@ def profile(message):
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
     role_names = {'rabotnik':'Работник','zakazchik':'Заказчик','moderator':'Модератор'}
-    text = f"👤 Профиль\nИмя: {user[2] or 'не указано'}\nТелефон: {user[3] or 'не указан'}\nРоль: {role_names.get(user[7], user[7])}\nРейтинг: {user[8]}\nНа смене: {'Да' if user[9] else 'Нет'}\nСоглашение: {'Да' if user[10] else 'Нет'}\nБлок: {'Да' if user[11] else 'Нет'}"
+    text = (f"👤 Профиль\n"
+            f"Имя: {user[2] or 'не указано'}\n"
+            f"Телефон: {user[3] or 'не указан'}\n"
+            f"Роль: {role_names.get(user[7], user[7])}\n"
+            f"Рейтинг: {user[8]}\n"
+            f"На смене: {'Да' if user[9] else 'Нет'}\n"
+            f"Соглашение: {'Да' if user[10] else 'Нет'}\n"
+            f"Блок: {'Да' if user[11] else 'Нет'}")
     bot.reply_to(message, text)
 
 @bot.message_handler(func=lambda m: m.text in ('🔴 Отдыхаю', '🟢 На смене'))
@@ -453,8 +465,8 @@ def toggle_shift(message):
         return
     if message.text == '🔴 Отдыхаю':
         update_user(uid, 'on_shift', 0)
-        bot.reply_to(message, "🔴 Вы отдыхаете.", reply_markup=worker_kb())
-    else:
+        bot.reply_to(message, "🔴 Вы отдыхаете. Заказы не приходят.", reply_markup=worker_kb())
+    else:  # '🟢 На смене'
         update_user(uid, 'on_shift', 1)
         bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb())
 
@@ -486,7 +498,7 @@ def get_order_hours(message, uid):
     try:
         order_data[uid]['hours'] = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введите число. Попробуйте снова.")
+        bot.reply_to(message, "❌ Введите число.")
         msg = bot.reply_to(message, "Введите количество часов (число):")
         bot.register_next_step_handler(msg, get_order_hours, uid)
         return
@@ -497,7 +509,7 @@ def get_order_people(message, uid):
     try:
         people = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введите число. Попробуйте снова.")
+        bot.reply_to(message, "❌ Введите число.")
         msg = bot.reply_to(message, "Введите количество человек (число):")
         bot.register_next_step_handler(msg, get_order_people, uid)
         return
@@ -516,10 +528,10 @@ def get_order_people(message, uid):
     order_id = c.lastrowid
     conn.close()
     del order_data[uid]
-    bot.reply_to(message, f"✅ Заказ #{order_id} создан!\n📍 {address}\n⏱ {hours}ч\n👥 {people}чел\n💰 {total}₽\n💵 Выплата каждому: {payout}₽\nКомиссия сервиса: {commission}₽", reply_markup=customer_kb())
+    bot.reply_to(message, f"✅ Заказ #{order_id} создан!\n📍 {address}\n⏱ {hours} ч\n👥 {people} чел\n💰 {total} ₽\n💵 Выплата каждому: {payout} ₽\nКомиссия сервиса: {commission} ₽", reply_markup=customer_kb())
     workers = get_workers_on_shift()
     if workers:
-        text = f"🔔 Новый заказ!\n📍 {address}\n⏱ {hours}ч\n👥 {people}чел\n💵 {payout}₽/чел\nСмотрите 'Свободные заказы'"
+        text = f"🔔 Новый заказ!\n📍 {address}\n⏱ {hours} ч\n👥 {people} чел\n💵 {payout} ₽/чел\nСмотрите 'Свободные заказы'"
         for w in workers:
             try:
                 bot.send_message(w, text)
@@ -539,7 +551,7 @@ def my_orders_customer(message):
         return
     for o in orders:
         status_map = {'open':'🟢 Открыт','in_progress':'🟡 В работе','completed':'✅ Завершён'}
-        text = f"🆔 Заказ #{o[0]}\n📍 {o[3]}\n⏱ {o[4]}ч\n👥 {o[5]}чел\n💰 {o[6]}₽\nСтатус: {status_map.get(o[9], o[9])}"
+        text = f"🆔 Заказ #{o[0]}\n📍 {o[3]}\n⏱ {o[4]} ч\n👥 {o[5]} чел\n💰 {o[6]} ₽\nСтатус: {status_map.get(o[9], o[9])}"
         if o[9] in ('open', 'in_progress'):
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.row(KeyboardButton(f"✅ Завершить #{o[0]}"))
@@ -660,7 +672,12 @@ def mod_stats(message):
     c.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed'")
     completed = c.fetchone()[0]
     conn.close()
-    text = f"📊 Статистика\n👥 Всего пользователей: {total_users}\n👷 Работников: {workers}\n🏢 Заказчиков: {customers}\n📦 Всего заказов: {total_orders}\n✅ Завершённых: {completed}"
+    text = (f"📊 Статистика\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"👷 Работников: {workers}\n"
+            f"🏢 Заказчиков: {customers}\n"
+            f"📦 Всего заказов: {total_orders}\n"
+            f"✅ Завершённых: {completed}")
     bot.reply_to(message, text)
 
 @bot.message_handler(func=lambda m: m.text == '⭐ Оценить' and m.from_user.id in MODERATOR_IDS)
