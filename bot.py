@@ -1,15 +1,12 @@
 import telebot
-import os
 import sqlite3
 from datetime import datetime
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# === ТВОЙ ТОКЕН ===
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
 bot = telebot.TeleBot(TOKEN)
 
-# === ТВОЙ ID МОДЕРАТОРА (и напарника, если есть) ===
-MODERATOR_IDS = [8746212340]  # добавь ID напарника через запятую
+MODERATOR_IDS = [8746212340]
 
 # === БАЗА ДАННЫХ ===
 def init_db():
@@ -218,12 +215,12 @@ def notify_workers_and_moderators(order_id, title, total_price, creator_name):
         except:
             pass
 
-# === ГЛАВНОЕ МЕНЮ ===
+# === ГЛАВНОЕ МЕНЮ (инлайн-кнопки) ===
 def main_menu(user_id):
     role = get_user_role(user_id)
     markup = InlineKeyboardMarkup(row_width=2)
     if role == 'customer':
-        btn1 = InlineKeyboardButton("➕ Создать заказ", callback_data="menu_new_order")
+        btn1 = InlineKeyboardButton("📝 Создать заказ", callback_data="menu_new_order")  # <-- изменено
         btn2 = InlineKeyboardButton("📋 Мои заказы", callback_data="menu_my_orders")
         btn3 = InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")
         btn4 = InlineKeyboardButton("📝 Регистрация", callback_data="menu_register")
@@ -322,7 +319,7 @@ def menu_callback(call):
         if data and data[1] and data[3]:
             bot.send_message(call.message.chat.id, f"✅ Вы уже зарегистрированы как {data[1]}, телефон {data[3]}. Хотите обновить данные?")
             markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("🔄 Обновить", callback_data="menu_register_force"))
+            markup.add(InlineKeyboardButton("🔄 Обновить", callback_data="register_force"))
             markup.add(InlineKeyboardButton("🔙 Назад", callback_data="menu_back"))
             bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
             return
@@ -506,7 +503,13 @@ def agree_callback(call):
     bot.edit_message_text("✅ Спасибо! Вы приняли условия.", chat_id=call.message.chat.id, message_id=call.message.message_id)
     bot.send_message(call.message.chat.id, "📱 Главное меню:", reply_markup=main_menu(user_id))
 
-# === СОЗДАНИЕ ЗАКАЗА ===
+@bot.callback_query_handler(func=lambda call: call.data == 'register_force')
+def register_force_callback(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    start_registration(call.message, user_id)
+
+# === СОЗДАНИЕ ЗАКАЗА (шаги) ===
 def get_order_title(message, user_id):
     if message.text == '/cancel':
         bot.reply_to(message, "❌ Создание заказа отменено.")
@@ -722,7 +725,6 @@ def cmd_new_order(message):
     if role != 'customer':
         bot.reply_to(message, "❌ Только для заказчиков.")
         return
-    # Проверяем регистрацию
     data = get_user_data(user_id)
     if not data or not data[1] or not data[3]:
         bot.reply_to(message, "❌ Сначала пройдите регистрацию (меню Регистрация).")
@@ -736,7 +738,7 @@ def cmd_new_order(message):
 # === ЗАПУСК ===
 print("✅ Бот запущен и слушает...")
 try:
-    bot.delete_webhook()   # принудительно убиваем вебхук
+    bot.delete_webhook()
     bot.remove_webhook()
 except:
     pass
