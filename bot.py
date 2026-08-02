@@ -147,6 +147,14 @@ def block_user_by_phone(phone):
     conn.close()
     return affected
 
+def get_user_by_phone(phone):
+    conn = sqlite3.connect('rabota.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
 # -------- КЛАВИАТУРЫ --------
 def main_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -154,11 +162,19 @@ def main_kb():
     kb.row(KeyboardButton("🛡️ Я модератор"))
     return kb
 
-def worker_kb():
+def worker_kb(uid=None):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📋 Свободные заказы"))
     kb.row(KeyboardButton("💰 Мои выплаты"), KeyboardButton("👤 Профиль"))
-    kb.row(KeyboardButton("🔴 Отдыхаю"), KeyboardButton("⬅️ Назад"))
+    # Кнопка смены: если пользователь на смене – "🔴 Отдыхаю", иначе "🟢 На смене"
+    if uid is not None:
+        user = get_user(uid)
+        if user and user[9] == 1:  # on_shift = 1
+            kb.row(KeyboardButton("🔴 Отдыхаю"), KeyboardButton("⬅️ Назад"))
+        else:
+            kb.row(KeyboardButton("🟢 На смене"), KeyboardButton("⬅️ Назад"))
+    else:
+        kb.row(KeyboardButton("⬅️ Назад"))
     return kb
 
 def customer_kb():
@@ -195,12 +211,12 @@ def start(message):
         conn.close()
         bot.reply_to(message, "👋 Выберите роль:", reply_markup=main_kb())
         return
-    if user[10] == 1:  # blocked
+    if user[10] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
     role = user[7]
     if role == 'rabotnik':
-        bot.reply_to(message, "Меню работника:", reply_markup=worker_kb())
+        bot.reply_to(message, "Меню работника:", reply_markup=worker_kb(uid))
     elif role == 'zakazchik':
         bot.reply_to(message, "Меню заказчика:", reply_markup=customer_kb())
     elif role == 'moderator':
@@ -226,13 +242,13 @@ def role_choice(message):
         return
     update_user(uid, 'role', role)
     if role == 'rabotnik':
-        bot.reply_to(message, "✅ Вы работник.", reply_markup=worker_kb())
+        bot.reply_to(message, "✅ Вы работник.", reply_markup=worker_kb(uid))
     elif role == 'zakazchik':
         bot.reply_to(message, "✅ Вы заказчик.", reply_markup=customer_kb())
     else:
         bot.reply_to(message, "✅ Вы модератор.", reply_markup=moderator_kb())
 
-# -------- НАЗАД (в главное меню) --------
+# -------- НАЗАД --------
 @bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
 def back_to_main(message):
     bot.reply_to(message, "Главное меню:", reply_markup=main_kb())
@@ -259,11 +275,7 @@ def reg_start(message):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
     bot.send_message(message.chat.id, 
-        "📜 Условия сервиса:\n"
-        "Сервис – посредник. Гарантирует выплату (работникам) и возврат денег при неявке (заказчикам).\n"
-        "Не отвечает за качество работы, травмы, кражи.\n"
-        "Оплата наличными отменяет гарантии.\n\n"
-        "Примите условия:", reply_markup=kb)
+        "📜 Условия сервиса:\nСервис – посредник. Гарантирует выплату (работникам) и возврат денег при неявке (заказчикам).\nНе отвечает за качество работы, травмы, кражи.\nОплата наличными отменяет гарантии.\n\nПримите условия:", reply_markup=kb)
 
 @bot.message_handler(func=lambda m: m.text in ['✅ Принимаю', '❌ Отмена'])
 def handle_agreement(message):
@@ -309,7 +321,7 @@ def finish_worker_reg(message, uid):
     conn.commit()
     conn.close()
     del reg_data[uid]
-    bot.reply_to(message, "✅ Регистрация завершена! Вы на смене.", reply_markup=worker_kb())
+    bot.reply_to(message, "✅ Регистрация завершена! Вы на смене.", reply_markup=worker_kb(uid))
 
 def get_customer_name(message, uid):
     reg_data[uid]['name'] = message.text
@@ -439,10 +451,10 @@ def toggle_shift(message):
         return
     if message.text == '🔴 Отдыхаю':
         update_user(uid, 'on_shift', 0)
-        bot.reply_to(message, "🔴 Отдыхаете.", reply_markup=worker_kb())
-    else:
+        bot.reply_to(message, "🔴 Вы отдыхаете.", reply_markup=worker_kb(uid))
+    else:  # '🟢 На смене'
         update_user(uid, 'on_shift', 1)
-        bot.reply_to(message, "🟢 На смене.", reply_markup=worker_kb())
+        bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb(uid))
 
 # -------- ЗАКАЗЧИК --------
 order_data = {}
@@ -753,7 +765,7 @@ def block_user_by_phone_step(message):
     affected = block_user_by_phone(phone)
     if affected:
         bot.reply_to(message, f"✅ Заблокировано {affected} пользователей.", reply_markup=moderator_kb())
-        user = get_user_by_phone(phone)  # нужно добавить функцию get_user_by_phone
+        user = get_user_by_phone(phone)
         if user:
             try:
                 bot.send_message(user[1], "⛔ Вы заблокированы модератором. Нажмите '📞 Связь с модератором'.")
@@ -761,15 +773,6 @@ def block_user_by_phone_step(message):
                 pass
     else:
         bot.reply_to(message, "❌ Номер не найден.", reply_markup=moderator_kb())
-
-# Добавим недостающую функцию get_user_by_phone
-def get_user_by_phone(phone):
-    conn = sqlite3.connect('rabota.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE phone = ?", (phone,))
-    row = c.fetchone()
-    conn.close()
-    return row
 
 # -------- ЗАБЛОКИРОВАННЫЙ --------
 @bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
