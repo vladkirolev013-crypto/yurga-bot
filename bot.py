@@ -12,7 +12,7 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # === ЗАМЕНИ НА РЕАЛЬНЫЕ ID ТЕБЯ И НАПАРНИКА ===
-MODERATOR_IDS = [123456789, 987654321]  # <-- ВСТАВЬ СВОИ ЦИФРЫ
+MODERATOR_IDS = [8746212340]  # <-- ВСТАВЬ СВОИ ЦИФРЫ
 
 # === БАЗА ДАННЫХ ===
 def init_db():
