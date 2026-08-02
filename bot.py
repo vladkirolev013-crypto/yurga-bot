@@ -5,7 +5,7 @@ from datetime import datetime
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
-MODERATOR_IDS = [8746212340]
+MODERATOR_IDS = [8746212340]  # ваш ID
 bot = telebot.TeleBot(TOKEN)
 
 # -------- БАЗА ДАННЫХ --------
@@ -162,19 +162,11 @@ def main_kb():
     kb.row(KeyboardButton("🛡️ Я модератор"))
     return kb
 
-def worker_kb(uid=None):
+def worker_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📋 Свободные заказы"))
     kb.row(KeyboardButton("💰 Мои выплаты"), KeyboardButton("👤 Профиль"))
-    # Кнопка смены: если пользователь на смене – "🔴 Отдыхаю", иначе "🟢 На смене"
-    if uid is not None:
-        user = get_user(uid)
-        if user and user[9] == 1:  # on_shift = 1
-            kb.row(KeyboardButton("🔴 Отдыхаю"), KeyboardButton("⬅️ Назад"))
-        else:
-            kb.row(KeyboardButton("🟢 На смене"), KeyboardButton("⬅️ Назад"))
-    else:
-        kb.row(KeyboardButton("⬅️ Назад"))
+    kb.row(KeyboardButton("🟢 На смене"), KeyboardButton("⬅️ Назад"))  # будет меняться на "🔴 Отдыхаю"
     return kb
 
 def customer_kb():
@@ -214,9 +206,9 @@ def start(message):
     if user[10] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    role = user[7]
+    role = user[6]
     if role == 'rabotnik':
-        bot.reply_to(message, "Меню работника:", reply_markup=worker_kb(uid))
+        bot.reply_to(message, "Меню работника:", reply_markup=worker_kb())
     elif role == 'zakazchik':
         bot.reply_to(message, "Меню заказчика:", reply_markup=customer_kb())
     elif role == 'moderator':
@@ -242,7 +234,7 @@ def role_choice(message):
         return
     update_user(uid, 'role', role)
     if role == 'rabotnik':
-        bot.reply_to(message, "✅ Вы работник.", reply_markup=worker_kb(uid))
+        bot.reply_to(message, "✅ Вы работник.", reply_markup=worker_kb())
     elif role == 'zakazchik':
         bot.reply_to(message, "✅ Вы заказчик.", reply_markup=customer_kb())
     else:
@@ -268,7 +260,7 @@ def reg_start(message):
     if user[9] == 1:
         bot.reply_to(message, "✅ Вы уже зарегистрированы.")
         return
-    if user[7] not in ['rabotnik', 'zakazchik']:
+    if user[6] not in ['rabotnik', 'zakazchik']:
         bot.reply_to(message, "❌ Сначала выберите роль.")
         return
     reg_data[uid] = {}
@@ -290,7 +282,7 @@ def handle_agreement(message):
         bot.reply_to(message, "Нажмите /start")
         return
     update_user(uid, 'agreement_accepted', 1)
-    role = user[7]
+    role = user[6]
     if role == 'rabotnik':
         msg = bot.reply_to(message, "Введите ФИО:")
         bot.register_next_step_handler(msg, get_worker_name, uid)
@@ -321,7 +313,7 @@ def finish_worker_reg(message, uid):
     conn.commit()
     conn.close()
     del reg_data[uid]
-    bot.reply_to(message, "✅ Регистрация завершена! Вы на смене.", reply_markup=worker_kb(uid))
+    bot.reply_to(message, "✅ Регистрация завершена! Вы на смене.", reply_markup=worker_kb())
 
 def get_customer_name(message, uid):
     reg_data[uid]['name'] = message.text
@@ -347,12 +339,12 @@ def finish_customer_reg(message, uid):
 def free_orders(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'rabotnik':
+    if not user or user[6] != 'rabotnik':
         return
     if user[10] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    if uid not in MODERATOR_IDS and user[9] == 0:
+    if user[9] == 0:
         bot.reply_to(message, "❌ Пройдите регистрацию.")
         return
     orders = get_open_orders()
@@ -370,7 +362,7 @@ def free_orders(message):
 def take_order(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'rabotnik':
+    if not user or user[6] != 'rabotnik':
         return
     try:
         oid = int(message.text.split('#')[1])
@@ -408,7 +400,7 @@ def take_order(message):
 def my_payouts(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'rabotnik':
+    if not user or user[6] != 'rabotnik':
         return
     orders = get_worker_orders(user[0])
     if not orders:
@@ -436,25 +428,28 @@ def profile(message):
     text = (f"👤 Профиль\n"
             f"Имя: {user[2] or 'не указано'}\n"
             f"Телефон: {user[3] or 'не указан'}\n"
-            f"Роль: {role_names.get(user[7], user[7])}\n"
-            f"Рейтинг: {user[8]}\n"
-            f"На смене: {'Да' if user[9] else 'Нет'}\n"
-            f"Соглашение: {'Да' if user[10] else 'Нет'}\n"
-            f"Блок: {'Да' if user[11] else 'Нет'}")
+            f"Роль: {role_names.get(user[6], user[6])}\n"
+            f"Рейтинг: {user[7]}\n"
+            f"На смене: {'Да' if user[8] else 'Нет'}\n"
+            f"Соглашение: {'Да' if user[9] else 'Нет'}\n"
+            f"Блок: {'Да' if user[10] else 'Нет'}")
     bot.reply_to(message, text)
 
-@bot.message_handler(func=lambda m: m.text in ('🔴 Отдыхаю', '🟢 На смене'))
+@bot.message_handler(func=lambda m: m.text in ('🟢 На смене', '🔴 Отдыхаю'))
 def toggle_shift(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'rabotnik':
+    if not user or user[6] != 'rabotnik':
         return
-    if message.text == '🔴 Отдыхаю':
-        update_user(uid, 'on_shift', 0)
-        bot.reply_to(message, "🔴 Вы отдыхаете.", reply_markup=worker_kb(uid))
-    else:  # '🟢 На смене'
+    if user[10] == 1:
+        bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
+        return
+    if message.text == '🟢 На смене':
         update_user(uid, 'on_shift', 1)
-        bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb(uid))
+        bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb())
+    else:  # '🔴 Отдыхаю'
+        update_user(uid, 'on_shift', 0)
+        bot.reply_to(message, "🔴 Вы отдыхаете.", reply_markup=worker_kb())
 
 # -------- ЗАКАЗЧИК --------
 order_data = {}
@@ -462,12 +457,12 @@ order_data = {}
 def create_order_start(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'zakazchik':
+    if not user or user[6] != 'zakazchik':
         return
     if user[10] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    if uid not in MODERATOR_IDS and user[9] == 0:
+    if user[9] == 0:
         bot.reply_to(message, "❌ Пройдите регистрацию.")
         return
     order_data[uid] = {}
@@ -528,7 +523,7 @@ def get_order_people(message, uid):
 def my_orders_customer(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'zakazchik':
+    if not user or user[6] != 'zakazchik':
         return
     orders = get_customer_orders(user[0])
     if not orders:
@@ -549,7 +544,7 @@ def my_orders_customer(message):
 def complete_order_customer(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'zakazchik':
+    if not user or user[6] != 'zakazchik':
         return
     try:
         oid = int(message.text.split('#')[1])
@@ -574,7 +569,7 @@ def complete_order_customer(message):
 def complain(message):
     uid = message.from_user.id
     user = get_user(uid)
-    if not user or user[7] != 'zakazchik':
+    if not user or user[6] != 'zakazchik':
         return
     msg = bot.reply_to(message, "Опишите жалобу:")
     bot.register_next_step_handler(msg, send_complaint, uid)
