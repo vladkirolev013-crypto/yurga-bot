@@ -61,6 +61,14 @@ def get_user(telegram_id):
     conn.close()
     return row
 
+def get_user_by_phone(phone):
+    conn = sqlite3.connect('rabota.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
 def update_user(telegram_id, field, value):
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
@@ -121,7 +129,7 @@ def get_workers_on_shift():
 def get_workers_list():
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
-    c.execute("SELECT id, name, rating, blocked FROM users WHERE role = 'rabotnik'")
+    c.execute("SELECT id, name, phone, rating, blocked FROM users WHERE role = 'rabotnik'")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -142,10 +150,10 @@ def add_rating(user_id, delta):
             pass
     conn.close()
 
-def block_user_by_name(name):
+def block_user_by_phone(phone):
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
-    c.execute("UPDATE users SET blocked = 1 WHERE name LIKE ?", ('%' + name + '%',))
+    c.execute("UPDATE users SET blocked = 1 WHERE phone = ?", (phone,))
     conn.commit()
     affected = c.rowcount
     conn.close()
@@ -335,11 +343,10 @@ def get_customer_name(message, uid):
 
 def get_customer_phone(message, uid):
     reg_data[uid]['phone'] = message.text
-    # Раньше здесь был вопрос о районе, теперь пропускаем
-    finish_customer_reg(message, uid)   # сразу завершаем
+    # Сразу завершаем регистрацию (без района)
+    finish_customer_reg(message, uid)
 
 def finish_customer_reg(message, uid):
-    # district не заполняем, оставляем NULL
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
     c.execute("UPDATE users SET name=?, phone=? WHERE telegram_id=?",
@@ -349,7 +356,7 @@ def finish_customer_reg(message, uid):
     del reg_data[uid]
     bot.reply_to(message, "✅ Регистрация завершена! Теперь вы можете создавать заказы.", reply_markup=customer_kb())
 
-# ===== РАБОТНИК =====
+# ===== РАБОТНИК (с пропуском проверок для модератора) =====
 @bot.message_handler(func=lambda m: m.text == '📋 Свободные заказы')
 def free_orders(message):
     uid = message.from_user.id
@@ -360,7 +367,8 @@ def free_orders(message):
     if user[11] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    if user[10] == 0:
+    # Модератор может смотреть заказы без регистрации
+    if uid not in MODERATOR_IDS and user[10] == 0:
         bot.reply_to(message, "❌ Пройдите регистрацию (кнопка 'Регистрация').")
         return
     orders = get_open_orders()
@@ -397,6 +405,7 @@ def take_order(message):
     if user[0] in assigned:
         bot.reply_to(message, "❌ Вы уже взяли этот заказ.")
         return
+    # Модератор может брать заказы без регистрации
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
     c.execute("INSERT INTO assignments (order_id, user_id, payout) VALUES (?, ?, ?)", (order_id, user[0], order[8]))
@@ -422,6 +431,9 @@ def my_payouts(message):
     user = get_user(uid)
     if not user or user[7] != 'rabotnik':
         bot.reply_to(message, "❌ Только для работников.")
+        return
+    if user[11] == 1:
+        bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
     orders = get_worker_orders(user[0])
     if not orders:
@@ -471,7 +483,7 @@ def toggle_shift(message):
         update_user(uid, 'on_shift', 1)
         bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb())
 
-# ===== ЗАКАЗЧИК =====
+# ===== ЗАКАЗЧИК (с пропуском проверок для модератора) =====
 order_data = {}
 @bot.message_handler(func=lambda m: m.text == '📝 Создать заказ')
 def create_order_start(message):
@@ -483,7 +495,8 @@ def create_order_start(message):
     if user[11] == 1:
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
-    if user[10] == 0:
+    # Модератор может создавать заказы без регистрации
+    if uid not in MODERATOR_IDS and user[10] == 0:
         bot.reply_to(message, "❌ Пройдите регистрацию (кнопка 'Регистрация').")
         return
     order_data[uid] = {}
@@ -520,11 +533,13 @@ def get_order_people(message, uid):
     total = hours * people * 500
     commission = hours * people * 50
     payout = (total - commission) // people
+    # Для модератора имя по умолчанию, если не заполнено
+    zakazchik_name = user[2] if user[2] else "Модератор"
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
     c.execute('''INSERT INTO orders (zakazchik_id, zakazchik_name, address, hours, people, total_sum, commission, payout_per_person, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (user[0], user[2] or "Заказчик", address, hours, people, total, commission, payout, datetime.now().isoformat()))
+              (user[0], zakazchik_name, address, hours, people, total, commission, payout, datetime.now().isoformat()))
     conn.commit()
     order_id = c.lastrowid
     conn.close()
@@ -655,7 +670,7 @@ def mod_workers(message):
         return
     text = "👥 Список работников:\n"
     for w in workers:
-        text += f"ID {w[0]}, {w[1]}, рейтинг {w[2]}, блок {'да' if w[3] else 'нет'}\n"
+        text += f"ID {w[0]}, Имя {w[1]}, Телефон {w[2]}, Рейтинг {w[3]}, Блок {'да' if w[4] else 'нет'}\n"
     bot.reply_to(message, text)
 
 @bot.message_handler(func=lambda m: m.text == '📊 Статистика' and m.from_user.id in MODERATOR_IDS)
@@ -775,16 +790,22 @@ def arbitrate_command(message):
 
 @bot.message_handler(func=lambda m: m.text == '🔒 Блок' and m.from_user.id in MODERATOR_IDS)
 def mod_block(message):
-    msg = bot.reply_to(message, "Введите имя пользователя (часть имени) для блокировки:")
-    bot.register_next_step_handler(msg, block_user)
+    msg = bot.reply_to(message, "Введите номер телефона пользователя (точно как указан при регистрации):")
+    bot.register_next_step_handler(msg, block_user_by_phone_step)
 
-def block_user(message):
-    name = message.text
-    affected = block_user_by_name(name)
+def block_user_by_phone_step(message):
+    phone = message.text
+    affected = block_user_by_phone(phone)
     if affected:
-        bot.reply_to(message, f"✅ Заблокировано {affected} пользователей.", reply_markup=moderator_kb())
+        bot.reply_to(message, f"✅ Заблокировано {affected} пользователей с номером {phone}.", reply_markup=moderator_kb())
+        user = get_user_by_phone(phone)
+        if user:
+            try:
+                bot.send_message(user[1], "⛔ Вы были заблокированы модератором. Для связи нажмите '📞 Связь с модератором'.")
+            except:
+                pass
     else:
-        bot.reply_to(message, "❌ Пользователи не найдены.", reply_markup=moderator_kb())
+        bot.reply_to(message, "❌ Пользователь с таким номером не найден.", reply_markup=moderator_kb())
 
 # ===== ЗАБЛОКИРОВАННЫЙ =====
 @bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
