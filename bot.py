@@ -4,11 +4,13 @@ import time
 from datetime import datetime
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
+# ===== КОНФИГ =====
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
-bot = telebot.TeleBot(TOKEN)
-MODERATOR_IDS = [8746212340]
+MODERATOR_IDS = [8746212340]  # твой ID
 
-# ========== БАЗА ДАННЫХ ==========
+bot = telebot.TeleBot(TOKEN)
+
+# ===== БАЗА ДАННЫХ =====
 def init_db():
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
@@ -50,7 +52,7 @@ def init_db():
 
 init_db()
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def get_user(telegram_id):
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
@@ -135,7 +137,7 @@ def add_rating(user_id, delta):
         c.execute("UPDATE users SET blocked = 1 WHERE id = ?", (user_id,))
         conn.commit()
         try:
-            bot.send_message(row[1], "⚠️ Вы заблокированы (рейтинг ≤ 5). Нажмите '📞 Связь с модератором'.")
+            bot.send_message(row[1], "⚠️ Ваш рейтинг упал до 5. Вы заблокированы. Нажмите '📞 Связь с модератором'.")
         except:
             pass
     conn.close()
@@ -149,7 +151,7 @@ def block_user_by_name(name):
     conn.close()
     return affected
 
-# ========== КЛАВИАТУРЫ ==========
+# ===== КЛАВИАТУРЫ =====
 def main_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("👷 Я работник"), KeyboardButton("🏢 Я заказчик"))
@@ -165,9 +167,9 @@ def worker_kb():
 
 def customer_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(KeyboardButton("📝 Создать заказ"), KeyboardButton("📋 Мои заказы"))
-    kb.row(KeyboardButton("👤 Профиль"), KeyboardButton("⚠️ Пожаловаться"))
-    kb.row(KeyboardButton("⬅️ Назад"))
+    kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📝 Создать заказ"))
+    kb.row(KeyboardButton("📋 Мои заказы"), KeyboardButton("👤 Профиль"))
+    kb.row(KeyboardButton("⚠️ Пожаловаться"), KeyboardButton("⬅️ Назад"))
     return kb
 
 def moderator_kb():
@@ -184,7 +186,7 @@ def blocked_kb():
     kb.row(KeyboardButton("📞 Связь с модератором"))
     return kb
 
-# ========== /start ==========
+# ===== /start =====
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.from_user.id
@@ -210,7 +212,7 @@ def start(message):
     else:
         bot.reply_to(message, "Выберите роль:", reply_markup=main_kb())
 
-# ========== ВЫБОР РОЛИ ==========
+# ===== ВЫБОР РОЛИ =====
 @bot.message_handler(func=lambda m: m.text in ['👷 Я работник', '🏢 Я заказчик', '🛡️ Я модератор'])
 def role_choice(message):
     uid = message.from_user.id
@@ -234,7 +236,7 @@ def role_choice(message):
     else:
         bot.reply_to(message, "✅ Вы модератор.", reply_markup=moderator_kb())
 
-# ========== НАЗАД ==========
+# ===== НАЗАД =====
 @bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
 def back(message):
     uid = message.from_user.id
@@ -252,7 +254,7 @@ def back(message):
     else:
         bot.reply_to(message, "Главное меню:", reply_markup=main_kb())
 
-# ========== РЕГИСТРАЦИЯ ==========
+# ===== РЕГИСТРАЦИЯ =====
 reg_data = {}
 @bot.message_handler(func=lambda m: m.text == '📝 Регистрация')
 def register_start(message):
@@ -273,7 +275,7 @@ def register_start(message):
     reg_data[uid] = {}
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
-    bot.send_message(message.chat.id, "📜 Примите соглашение, чтобы продолжить.", reply_markup=kb)
+    bot.send_message(message.chat.id, "📜 Чтобы продолжить, примите условия работы сервиса. Нажмите '✅ Принимаю' или '❌ Отмена'.", reply_markup=kb)
 
 @bot.message_handler(func=lambda m: m.text in ['✅ Принимаю', '❌ Отмена'])
 def handle_agreement(message):
@@ -290,25 +292,25 @@ def handle_agreement(message):
     update_user(uid, 'agreement_accepted', 1)
     role = user[7]
     if role == 'rabotnik':
-        msg = bot.reply_to(message, "Введите ФИО:", reply_markup=main_kb())
+        msg = bot.reply_to(message, "Введите ваше полное имя (ФИО):")
         bot.register_next_step_handler(msg, get_worker_name, uid)
     else:
-        msg = bot.reply_to(message, "Введите ФИО:", reply_markup=main_kb())
+        msg = bot.reply_to(message, "Введите ваше полное имя (ФИО):")
         bot.register_next_step_handler(msg, get_customer_name, uid)
 
 def get_worker_name(message, uid):
     reg_data[uid]['name'] = message.text
-    msg = bot.reply_to(message, "Введите телефон:")
+    msg = bot.reply_to(message, "Введите ваш номер телефона (например, +7 999 123-45-67):")
     bot.register_next_step_handler(msg, get_worker_phone, uid)
 
 def get_worker_phone(message, uid):
     reg_data[uid]['phone'] = message.text
-    msg = bot.reply_to(message, "Введите реквизиты банка (карта):")
+    msg = bot.reply_to(message, "Введите номер карты или реквизиты для выплат:")
     bot.register_next_step_handler(msg, get_worker_bank, uid)
 
 def get_worker_bank(message, uid):
     reg_data[uid]['bank'] = message.text
-    msg = bot.reply_to(message, "Введите инициалы (И.И. Иванов):")
+    msg = bot.reply_to(message, "Введите инициалы (например, И.И. Иванов):")
     bot.register_next_step_handler(msg, finish_worker_reg, uid)
 
 def finish_worker_reg(message, uid):
@@ -319,16 +321,16 @@ def finish_worker_reg(message, uid):
     conn.commit()
     conn.close()
     del reg_data[uid]
-    bot.reply_to(message, "✅ Регистрация завершена! Вы на смене.", reply_markup=worker_kb())
+    bot.reply_to(message, "✅ Регистрация завершена! Вы на смене и можете брать заказы.", reply_markup=worker_kb())
 
 def get_customer_name(message, uid):
     reg_data[uid]['name'] = message.text
-    msg = bot.reply_to(message, "Введите телефон:")
+    msg = bot.reply_to(message, "Введите ваш номер телефона (например, +7 999 123-45-67):")
     bot.register_next_step_handler(msg, get_customer_phone, uid)
 
 def get_customer_phone(message, uid):
     reg_data[uid]['phone'] = message.text
-    msg = bot.reply_to(message, "Введите район (город):")
+    msg = bot.reply_to(message, "Введите ваш район (город, улицу):")
     bot.register_next_step_handler(msg, finish_customer_reg, uid)
 
 def finish_customer_reg(message, uid):
@@ -339,9 +341,9 @@ def finish_customer_reg(message, uid):
     conn.commit()
     conn.close()
     del reg_data[uid]
-    bot.reply_to(message, "✅ Регистрация завершена!", reply_markup=customer_kb())
+    bot.reply_to(message, "✅ Регистрация завершена! Теперь вы можете создавать заказы.", reply_markup=customer_kb())
 
-# ========== РАБОТНИК ==========
+# ===== РАБОТНИК =====
 @bot.message_handler(func=lambda m: m.text == '📋 Свободные заказы')
 def free_orders(message):
     uid = message.from_user.id
@@ -353,7 +355,7 @@ def free_orders(message):
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
     if user[10] == 0:
-        bot.reply_to(message, "❌ Пройдите регистрацию.")
+        bot.reply_to(message, "❌ Пройдите регистрацию (кнопка 'Регистрация').")
         return
     orders = get_open_orders()
     if not orders:
@@ -395,7 +397,11 @@ def take_order(message):
     conn.commit()
     conn.close()
     if len(assigned) + 1 >= order[5]:
-        update_user(order[1], 'status', 'in_progress')
+        conn = sqlite3.connect('rabota.db')
+        c = conn.cursor()
+        c.execute("UPDATE orders SET status = 'in_progress' WHERE id = ?", (order_id,))
+        conn.commit()
+        conn.close()
         bot.reply_to(message, f"✅ Заказ #{order_id} укомплектован!")
         try:
             bot.send_message(order[1], f"🔔 Заказ #{order_id} полностью укомплектован.")
@@ -413,7 +419,7 @@ def my_payouts(message):
         return
     orders = get_worker_orders(user[0])
     if not orders:
-        bot.reply_to(message, "💰 Нет выплат.")
+        bot.reply_to(message, "💰 У вас пока нет выплат.")
         return
     total = 0
     text = "💰 Ваши выплаты:\n"
@@ -452,7 +458,7 @@ def toggle_shift(message):
         update_user(uid, 'on_shift', 1)
         bot.reply_to(message, "🟢 Вы на смене.", reply_markup=worker_kb())
 
-# ========== ЗАКАЗЧИК ==========
+# ===== ЗАКАЗЧИК =====
 order_data = {}
 @bot.message_handler(func=lambda m: m.text == '📝 Создать заказ')
 def create_order_start(message):
@@ -465,23 +471,23 @@ def create_order_start(message):
         bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
         return
     if user[10] == 0:
-        bot.reply_to(message, "❌ Пройдите регистрацию.")
+        bot.reply_to(message, "❌ Пройдите регистрацию (кнопка 'Регистрация').")
         return
     order_data[uid] = {}
-    msg = bot.reply_to(message, "Введите адрес:")
+    msg = bot.reply_to(message, "Введите адрес работы:")
     bot.register_next_step_handler(msg, get_order_address, uid)
 
 def get_order_address(message, uid):
     order_data[uid]['address'] = message.text
-    msg = bot.reply_to(message, "Введите часы (число):")
+    msg = bot.reply_to(message, "Введите количество часов (число):")
     bot.register_next_step_handler(msg, get_order_hours, uid)
 
 def get_order_hours(message, uid):
     try:
         order_data[uid]['hours'] = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введите число.")
-        msg = bot.reply_to(message, "Введите часы (число):")
+        bot.reply_to(message, "❌ Введите число. Попробуйте снова.")
+        msg = bot.reply_to(message, "Введите количество часов (число):")
         bot.register_next_step_handler(msg, get_order_hours, uid)
         return
     msg = bot.reply_to(message, "Введите количество человек (число):")
@@ -491,7 +497,7 @@ def get_order_people(message, uid):
     try:
         people = int(message.text)
     except:
-        bot.reply_to(message, "❌ Введите число.")
+        bot.reply_to(message, "❌ Введите число. Попробуйте снова.")
         msg = bot.reply_to(message, "Введите количество человек (число):")
         bot.register_next_step_handler(msg, get_order_people, uid)
         return
@@ -510,7 +516,7 @@ def get_order_people(message, uid):
     order_id = c.lastrowid
     conn.close()
     del order_data[uid]
-    bot.reply_to(message, f"✅ Заказ #{order_id} создан!\n📍 {address}\n⏱ {hours}ч\n👥 {people}чел\n💰 {total}₽\n💵 Выплата каждому: {payout}₽\nКомиссия: {commission}₽", reply_markup=customer_kb())
+    bot.reply_to(message, f"✅ Заказ #{order_id} создан!\n📍 {address}\n⏱ {hours}ч\n👥 {people}чел\n💰 {total}₽\n💵 Выплата каждому: {payout}₽\nКомиссия сервиса: {commission}₽", reply_markup=customer_kb())
     workers = get_workers_on_shift()
     if workers:
         text = f"🔔 Новый заказ!\n📍 {address}\n⏱ {hours}ч\n👥 {people}чел\n💵 {payout}₽/чел\nСмотрите 'Свободные заказы'"
@@ -559,7 +565,7 @@ def complete_order_customer(message):
         bot.reply_to(message, "❌ Это не ваш заказ.")
         return
     if order[9] == 'completed':
-        bot.reply_to(message, "❌ Уже завершён.")
+        bot.reply_to(message, "❌ Заказ уже завершён.")
         return
     conn = sqlite3.connect('rabota.db')
     c = conn.cursor()
@@ -575,20 +581,20 @@ def complain(message):
     if not user or user[7] != 'zakazchik':
         bot.reply_to(message, "❌ Только для заказчиков.")
         return
-    msg = bot.reply_to(message, "Опишите жалобу:")
+    msg = bot.reply_to(message, "Опишите вашу жалобу (текст):")
     bot.register_next_step_handler(msg, send_complaint, uid)
 
 def send_complaint(message, uid):
     user = get_user(uid)
-    text = f"⚠️ Жалоба от {user[2] or 'без имени'} (ID {uid}):\n{message.text}"
+    text = f"⚠️ Жалоба от заказчика {user[2] or 'без имени'} (ID {uid}):\n{message.text}"
     for m in MODERATOR_IDS:
         try:
             bot.send_message(m, text)
         except:
             pass
-    bot.reply_to(message, "✅ Отправлено модератору.", reply_markup=customer_kb())
+    bot.reply_to(message, "✅ Жалоба отправлена модератору.", reply_markup=customer_kb())
 
-# ========== МОДЕРАТОР ==========
+# ===== МОДЕРАТОР =====
 @bot.message_handler(func=lambda m: m.text == '💰 Выплаты' and m.from_user.id in MODERATOR_IDS)
 def mod_payouts(message):
     conn = sqlite3.connect('rabota.db')
@@ -598,7 +604,7 @@ def mod_payouts(message):
     c.execute("SELECT COUNT(*) FROM assignments")
     count = c.fetchone()[0] or 0
     conn.close()
-    bot.reply_to(message, f"💰 Всего выплат: {total}₽\n👥 Количество: {count}")
+    bot.reply_to(message, f"💰 Всего выплат: {total}₽\n👥 Количество выплат: {count}")
 
 @bot.message_handler(func=lambda m: m.text == '🟡 Активные' and m.from_user.id in MODERATOR_IDS)
 def mod_active(message):
@@ -634,7 +640,7 @@ def mod_workers(message):
     if not workers:
         bot.reply_to(message, "👥 Нет работников.")
         return
-    text = "👥 Работники:\n"
+    text = "👥 Список работников:\n"
     for w in workers:
         text += f"ID {w[0]}, {w[1]}, рейтинг {w[2]}, блок {'да' if w[3] else 'нет'}\n"
     bot.reply_to(message, text)
@@ -654,12 +660,12 @@ def mod_stats(message):
     c.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed'")
     completed = c.fetchone()[0]
     conn.close()
-    text = f"📊 Статистика\n👥 Пользователей: {total_users}\n👷 Работников: {workers}\n🏢 Заказчиков: {customers}\n📦 Заказов: {total_orders}\n✅ Завершённых: {completed}"
+    text = f"📊 Статистика\n👥 Всего пользователей: {total_users}\n👷 Работников: {workers}\n🏢 Заказчиков: {customers}\n📦 Всего заказов: {total_orders}\n✅ Завершённых: {completed}"
     bot.reply_to(message, text)
 
 @bot.message_handler(func=lambda m: m.text == '⭐ Оценить' and m.from_user.id in MODERATOR_IDS)
 def mod_rate_start(message):
-    msg = bot.reply_to(message, "Введите ID работника (число):")
+    msg = bot.reply_to(message, "Введите ID работника (число) из списка /workers:")
     bot.register_next_step_handler(msg, mod_rate_get_user)
 
 def mod_rate_get_user(message):
@@ -684,7 +690,7 @@ def mod_rate_get_user(message):
 
 def mod_rate_apply(message, user_id):
     if message.text not in ('➕ +1', '➖ -1', '⏺ 0'):
-        bot.reply_to(message, "❌ Нажмите кнопку.", reply_markup=moderator_kb())
+        bot.reply_to(message, "❌ Нажмите одну из кнопок.", reply_markup=moderator_kb())
         return
     delta = {'➕ +1': 1, '➖ -1': -1, '⏺ 0': 0}[message.text]
     add_rating(user_id, delta)
@@ -705,7 +711,7 @@ def mod_arbitration(message):
     if not rows:
         bot.reply_to(message, "⚖️ Нет заказов для арбитража.")
         return
-    text = "⚖️ Заказы:\n"
+    text = "⚖️ Заказы для арбитража:\n"
     for r in rows:
         text += f"ID {r[0]}, {r[1]}, {r[2]}, статус {r[3]}\n"
     text += "\nКоманды: /arbitrate ID refund | penalty | ban"
@@ -717,7 +723,7 @@ def arbitrate_command(message):
         return
     parts = message.text.split()
     if len(parts) < 3:
-        bot.reply_to(message, "❌ /arbitrate ID refund/penalty/ban")
+        bot.reply_to(message, "❌ Используйте: /arbitrate ID refund/penalty/ban")
         return
     try:
         order_id = int(parts[1])
@@ -735,7 +741,7 @@ def arbitrate_command(message):
         c.execute("UPDATE orders SET status = 'completed' WHERE id = ?", (order_id,))
         conn.commit()
         conn.close()
-        bot.reply_to(message, f"✅ Заказ #{order_id} отменён, деньги возвращены.")
+        bot.reply_to(message, f"✅ Заказ #{order_id} отменён, деньги возвращены заказчику.")
     elif action == 'penalty':
         add_rating(order[1], -1)
         bot.reply_to(message, f"✅ Заказчику #{order[1]} снижен рейтинг на 1.")
@@ -747,11 +753,11 @@ def arbitrate_command(message):
         conn.close()
         bot.reply_to(message, f"✅ Заказчик #{order[1]} заблокирован.")
     else:
-        bot.reply_to(message, "❌ Действие: refund, penalty, ban.")
+        bot.reply_to(message, "❌ Неизвестное действие. Доступны: refund, penalty, ban.")
 
 @bot.message_handler(func=lambda m: m.text == '🔒 Блок' and m.from_user.id in MODERATOR_IDS)
 def mod_block(message):
-    msg = bot.reply_to(message, "Введите имя (часть) для блокировки:")
+    msg = bot.reply_to(message, "Введите имя пользователя (часть имени) для блокировки:")
     bot.register_next_step_handler(msg, block_user)
 
 def block_user(message):
@@ -760,9 +766,9 @@ def block_user(message):
     if affected:
         bot.reply_to(message, f"✅ Заблокировано {affected} пользователей.", reply_markup=moderator_kb())
     else:
-        bot.reply_to(message, "❌ Не найдено.", reply_markup=moderator_kb())
+        bot.reply_to(message, "❌ Пользователи не найдены.", reply_markup=moderator_kb())
 
-# ========== ЗАБЛОКИРОВАННЫЙ ==========
+# ===== ЗАБЛОКИРОВАННЫЙ =====
 @bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
 def contact_moderator(message):
     uid = message.from_user.id
@@ -771,18 +777,18 @@ def contact_moderator(message):
         return
     for m in MODERATOR_IDS:
         try:
-            bot.send_message(m, f"📞 Пользователь {uid} ({user[2]}) просит связи.")
+            bot.send_message(m, f"📞 Пользователь {uid} ({user[2]}) запросил связь с модератором.")
         except:
             pass
-    bot.reply_to(message, "✅ Запрос отправлен.")
+    bot.reply_to(message, "✅ Ваш запрос отправлен. Ожидайте ответа.")
 
-# ========== FALLBACK ==========
+# ===== FALLBACK =====
 @bot.message_handler(func=lambda m: True)
 def fallback(message):
-    bot.reply_to(message, "Используйте кнопки.", reply_markup=main_kb())
+    bot.reply_to(message, "Используйте кнопки меню.", reply_markup=main_kb())
 
-# ========== ЗАПУСК ==========
-print("✅ Бот запущен")
+# ===== ЗАПУСК =====
+print("✅ Бот запущен и слушает...")
 try:
     bot.delete_webhook()
 except:
@@ -792,5 +798,5 @@ while True:
     try:
         bot.polling(none_stop=True, interval=0, timeout=20)
     except Exception as e:
-        print(f"⚠️ Ошибка: {e}. Перезапуск...")
+        print(f"⚠️ Ошибка: {e}. Перезапуск через 5 секунд...")
         time.sleep(5)
