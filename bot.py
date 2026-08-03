@@ -10,7 +10,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
-MODERATOR_IDS = [8746212340]
+
+# ========== СПИСОК МОДЕРАТОРОВ ==========
+# Добавь сюда ID всех модераторов (твой и напарника)
+MODERATOR_IDS = [
+    8746212340,  # Твой ID
+    # 123456789,  # ID напарника - добавь сюда
+]
+
 bot = telebot.TeleBot(TOKEN)
 
 # ========== КЛАСС БАЗЫ ДАННЫХ ==========
@@ -309,13 +316,17 @@ _customer_kb = None
 _moderator_kb = None
 _blocked_kb = None
 
-def get_main_kb():
+def get_main_kb(telegram_id=None):
+    """Главное меню - кнопка модератора показывается только модераторам"""
     global _main_kb
-    if _main_kb is None:
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.row(KeyboardButton("👷 Я работник"), KeyboardButton("🏢 Я заказчик"))
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("👷 Я работник"), KeyboardButton("🏢 Я заказчик"))
+    
+    # Показываем кнопку модератора только если пользователь в списке
+    if telegram_id and telegram_id in MODERATOR_IDS:
         kb.row(KeyboardButton("🛡️ Я модератор"))
-        _main_kb = kb
+    
+    _main_kb = kb
     return _main_kb
 
 def get_worker_kb():
@@ -390,7 +401,7 @@ def start(message):
         if not user:
             db.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?)", (uid,))
             db.commit()
-            bot.reply_to(message, "👋 Добро пожаловать в бот Юрга-Подработка!\n\nВыберите свою роль:", reply_markup=get_main_kb())
+            bot.reply_to(message, "👋 Добро пожаловать в бот Юрга-Подработка!\n\nВыберите свою роль:", reply_markup=get_main_kb(uid))
             return
         
         if user[11] == 1:  # blocked
@@ -406,7 +417,7 @@ def start(message):
         elif role == 'moderator':
             bot.reply_to(message, "🛡️ Панель модератора", reply_markup=get_moderator_kb())
         else:
-            bot.reply_to(message, "👋 Выберите роль:", reply_markup=get_main_kb())
+            bot.reply_to(message, "👋 Выберите роль:", reply_markup=get_main_kb(uid))
     except Exception as e:
         logging.error(f"Ошибка в start: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -454,10 +465,10 @@ def back_to_main(message):
         if user and user[6] == 'moderator' and uid in MODERATOR_IDS:
             bot.reply_to(message, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
         else:
-            bot.reply_to(message, "📱 Главное меню:", reply_markup=get_main_kb())
+            bot.reply_to(message, "📱 Главное меню:", reply_markup=get_main_kb(uid))
     except Exception as e:
         logging.error(f"Ошибка в back_to_main: {e}")
-        bot.reply_to(message, "❌ Ошибка.", reply_markup=get_main_kb())
+        bot.reply_to(message, "❌ Ошибка.", reply_markup=get_main_kb(None))
 
 # ========== РЕГИСТРАЦИЯ ==========
 @bot.message_handler(func=lambda m: m.text == '📝 Регистрация')
@@ -504,7 +515,7 @@ def handle_agreement(message):
         uid = message.from_user.id
         
         if message.text == '❌ Отмена':
-            bot.reply_to(message, "❌ Регистрация отменена.", reply_markup=get_main_kb())
+            bot.reply_to(message, "❌ Регистрация отменена.", reply_markup=get_main_kb(uid))
             if uid in reg_data:
                 del reg_data[uid]
             return
@@ -785,8 +796,7 @@ def get_order_people(message, uid):
         
         hours = order_data[uid]['hours']
         
-        # Расчёт сумм
-        total = hours * people * 500
+        # Расчёт сумм        total = hours * people * 500
         commission = hours * people * 50
         payout = (total - commission) // people
         
@@ -804,17 +814,34 @@ def get_order_people(message, uid):
         
         del order_data[uid]
         
+        # Заказчику показываем только сумму к оплате (без комиссии)
         bot.reply_to(
             message, 
             f"✅ ЗАКАЗ #{order_id} СОЗДАН!\n\n"
             f"💰 Сумма к оплате: {total} ₽\n"
             f"💵 Выплата работнику: {payout} ₽/чел\n"
-            f"📊 Комиссия сервиса: {commission} ₽\n"
             f"📍 Адрес: {address}\n"
             f"⏱ Часы: {hours} ч.\n"
             f"👥 Человек: {people}",
             reply_markup=get_customer_kb()
         )
+        
+        # Модераторам показываем полную информацию с комиссией
+        for m in MODERATOR_IDS:
+            try:
+                bot.send_message(
+                    m,
+                    f"📊 НОВЫЙ ЗАКАЗ #{order_id}\n\n"
+                    f"👤 Заказчик: {name}\n"
+                    f"📍 Адрес: {address}\n"
+                    f"⏱ Часы: {hours} ч.\n"
+                    f"👥 Человек: {people}\n"
+                    f"💰 Сумма: {total} ₽\n"
+                    f"📊 Комиссия: {commission} ₽\n"
+                    f"💵 Выплата: {payout} ₽/чел"
+                )
+            except:
+                pass
         
         # Уведомляем всех работников
         workers = get_workers()
@@ -988,7 +1015,8 @@ def mod_completed(message):
                 f"📍 Адрес: {row['address']}\n"
                 f"⏱ Часы: {row['hours']}, 👥 {row['people']} чел.\n"
                 f"💰 Сумма: {row['total_sum']} ₽\n"
-                f"📊 Комиссия: {row['commission']} ₽"
+                f"📊 Комиссия: {row['commission']} ₽\n"
+                f"💵 Выплата: {row['payout_per_person']} ₽/чел"
             )
             bot.send_message(message.chat.id, text)
     except Exception as e:
@@ -1072,6 +1100,11 @@ def mod_stats(message):
         if total_payouts is None:
             total_payouts = 0
         
+        c = db.execute("SELECT SUM(commission) FROM orders WHERE status = 'completed'")
+        total_commission = c.fetchone()[0] if c else 0
+        if total_commission is None:
+            total_commission = 0
+        
         text = (
             f"📊 СТАТИСТИКА\n\n"
             f"👥 Всего пользователей: {total_users}\n"
@@ -1082,7 +1115,8 @@ def mod_stats(message):
             f"🟡 В работе: {in_progress}\n"
             f"✅ Завершённых: {completed}\n"
             f"❌ Отменённых: {cancelled}\n\n"
-            f"💰 Выплачено: {total_payouts} ₽"
+            f"💰 Выплачено: {total_payouts} ₽\n"
+            f"📊 Комиссия собрана: {total_commission} ₽"
         )
         bot.reply_to(message, text)
     except Exception as e:
@@ -1651,7 +1685,7 @@ def fallback(message):
         if user and user[6] == 'moderator' and uid in MODERATOR_IDS:
             bot.reply_to(message, "Используйте кнопки панели модератора.", reply_markup=get_moderator_kb())
         else:
-            bot.reply_to(message, "Используйте кнопки меню.", reply_markup=get_main_kb())
+            bot.reply_to(message, "Используйте кнопки меню.", reply_markup=get_main_kb(uid))
     except Exception as e:
         logging.error(f"Ошибка в fallback: {e}")
 
