@@ -12,10 +12,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
 
 # ========== СПИСОК МОДЕРАТОРОВ ==========
-# Добавь сюда ID всех модераторов (твой и напарника)
 MODERATOR_IDS = [
     8746212340,  # Твой ID
-    # 123456789,  # ID напарника - добавь сюда
 ]
 
 bot = telebot.TeleBot(TOKEN)
@@ -259,7 +257,7 @@ def get_all_customers():
 
 def get_customer_orders_with_details(zakazchik_id):
     try:
-        c = db.execute("""SELECT o.id, o.total_sum, o.status, o.payout_per_person, o.people,
+        c = db.execute("""SELECT o.id, o.total_sum, o.status, o.people,
                             COUNT(a.user_id) as taken
                      FROM orders o
                      LEFT JOIN assignments a ON o.id = a.order_id
@@ -269,7 +267,7 @@ def get_customer_orders_with_details(zakazchik_id):
         if c is None:
             return []
         rows = c.fetchall()
-        return [[row['id'], row['total_sum'], row['status'], row['payout_per_person'], row['people'], row['taken']] for row in rows]
+        return [[row['id'], row['total_sum'], row['status'], row['people'], row['taken']] for row in rows]
     except Exception as e:
         logging.error(f"Ошибка get_customer_orders_with_details: {e}")
         return []
@@ -297,11 +295,9 @@ _moderator_kb = None
 _blocked_kb = None
 
 def get_main_kb(telegram_id=None):
-    """Главное меню - доступно всем"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("👷 Я работник"), KeyboardButton("🏢 Я заказчик"))
     
-    # Кнопка модератора показывается только если пользователь в списке
     if telegram_id and telegram_id in MODERATOR_IDS:
         kb.row(KeyboardButton("🛡️ Я модератор"))
     
@@ -381,7 +377,7 @@ def start(message):
             bot.reply_to(message, "👋 Добро пожаловать в бот Юрга-Подработка!\n\nВыберите свою роль:", reply_markup=get_main_kb(uid))
             return
         
-        if user[11] == 1:  # blocked
+        if user[11] == 1:
             bot.reply_to(message, "⛔ Ваш аккаунт заблокирован модератором.\nДля связи нажмите кнопку ниже:", reply_markup=get_blocked_kb())
             return
         
@@ -399,7 +395,6 @@ def start(message):
         logging.error(f"Ошибка в start: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
-# ========== ВЫБОР РОЛИ ==========
 @bot.message_handler(func=lambda m: m.text in ['👷 Я работник', '🏢 Я заказчик', '🛡️ Я модератор'])
 def role_choice(message):
     try:
@@ -417,15 +412,12 @@ def role_choice(message):
         role_map = {'👷 Я работник': 'rabotnik', '🏢 Я заказчик': 'zakazchik', '🛡️ Я модератор': 'moderator'}
         selected_role = role_map[message.text]
         
-        # Проверяем, может ли пользователь выбрать эту роль
         if selected_role == 'moderator' and uid not in MODERATOR_IDS:
             bot.reply_to(message, "❌ У вас нет прав модератора.")
             return
         
-        # Обновляем роль в БД
         update_user(uid, 'role', selected_role)
         
-        # Показываем соответствующее меню
         if selected_role == 'rabotnik':
             bot.reply_to(message, "✅ Вы переключились на роль работника!", reply_markup=get_worker_kb())
         elif selected_role == 'zakazchik':
@@ -437,20 +429,11 @@ def role_choice(message):
         logging.error(f"Ошибка в role_choice: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
-# ========== НАЗАД В ГЛАВНОЕ МЕНЮ ==========
 @bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
 def back_to_main(message):
     try:
         uid = message.from_user.id
-        user = get_user(uid)
-        
-        if not user:
-            bot.reply_to(message, "📱 Главное меню:", reply_markup=get_main_kb(uid))
-            return
-        
-        # Всегда показываем главное меню с возможностью выбора любой роли
         bot.reply_to(message, "📱 Главное меню:\n\nВыберите роль:", reply_markup=get_main_kb(uid))
-        
     except Exception as e:
         logging.error(f"Ошибка в back_to_main: {e}")
         bot.reply_to(message, "📱 Главное меню:", reply_markup=get_main_kb(None))
@@ -784,7 +767,6 @@ def get_order_people(message, uid):
         
         hours = order_data[uid]['hours']
         
-        # Расчёт сумм
         total = hours * people * 500
         commission = hours * people * 50
         payout = (total - commission) // people
@@ -803,7 +785,7 @@ def get_order_people(message, uid):
         
         del order_data[uid]
         
-        # ЗАКАЗЧИКУ - только сумма и спасибо
+        # ===== ЗАКАЗЧИКУ - ТОЛЬКО СУММА, БЕЗ ВЫПЛАТЫ =====
         bot.reply_to(
             message, 
             f"✅ ЗАКАЗ #{order_id} СОЗДАН!\n\n"
@@ -815,7 +797,7 @@ def get_order_people(message, uid):
             reply_markup=get_customer_kb()
         )
         
-        # РАБОТНИКАМ - только выплата
+        # ===== РАБОТНИКАМ - ТОЛЬКО ВЫПЛАТА =====
         workers = get_workers()
         if workers:
             text = (
@@ -832,7 +814,7 @@ def get_order_people(message, uid):
                 except Exception as e:
                     logging.error(f"Ошибка отправки уведомления работнику {w}: {e}")
         
-        # МОДЕРАТОРАМ - полная информация с комиссией
+        # ===== МОДЕРАТОРАМ - ВСЯ ИНФОРМАЦИЯ =====
         for m in MODERATOR_IDS:
             try:
                 bot.send_message(
@@ -881,11 +863,12 @@ def my_orders_customer(message):
         }
         
         for o in orders:
+            # ===== ЗАКАЗЧИК НЕ ВИДИТ ВЫПЛАТУ! =====
             text = (
                 f"🆔 Заказ #{o[0]}\n"
                 f"💰 Сумма: {o[1]} ₽\n"
                 f"📊 Статус: {status_map.get(o[2], o[2])}\n"
-                f"👥 Работников: {o[5]}/{o[4]}"
+                f"👥 Работников: {o[4]}/{o[3]}"
             )
             
             if o[2] in ('open', 'in_progress'):
@@ -949,7 +932,6 @@ def moderator_commands(message):
         
         text = message.text
         
-        # ===== ВЫПЛАТЫ =====
         if text == '💰 Выплаты':
             c = db.execute("SELECT SUM(payout) FROM assignments")
             if c:
@@ -970,7 +952,6 @@ def moderator_commands(message):
                 f"👥 Количество выплат: {count}"
             )
         
-        # ===== АКТИВНЫЕ =====
         elif text == '🟡 Активные':
             c = db.execute("SELECT * FROM orders WHERE status IN ('open', 'in_progress') ORDER BY created_at DESC")
             if c is None:
@@ -995,7 +976,6 @@ def moderator_commands(message):
                 )
                 bot.send_message(message.chat.id, msg_text)
         
-        # ===== ЗАВЕРШЁННЫЕ =====
         elif text == '✅ Завершённые':
             c = db.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY created_at DESC")
             if c is None:
@@ -1019,7 +999,6 @@ def moderator_commands(message):
                 )
                 bot.send_message(message.chat.id, msg_text)
         
-        # ===== РАБОТНИКИ =====
         elif text == '👥 Работники':
             workers = get_all_workers()
             if not workers:
@@ -1038,7 +1017,6 @@ def moderator_commands(message):
             
             bot.reply_to(message, msg_text)
         
-        # ===== ЗАКАЗЧИКИ =====
         elif text == '🏢 Заказчики':
             customers = get_all_customers()
             if not customers:
@@ -1056,7 +1034,6 @@ def moderator_commands(message):
             
             bot.reply_to(message, msg_text)
         
-        # ===== СТАТИСТИКА =====
         elif text == '📊 Статистика':
             c = db.execute("SELECT COUNT(*) FROM users")
             total_users = c.fetchone()[0] if c else 0
@@ -1107,17 +1084,14 @@ def moderator_commands(message):
             )
             bot.reply_to(message, msg_text)
         
-        # ===== ОЦЕНИТЬ РАБОТНИКА =====
         elif text == '⭐ Оценить работника':
             msg = bot.reply_to(message, "Введите ID работника (число):")
             bot.register_next_step_handler(msg, mod_rate_get_user)
         
-        # ===== ОЦЕНИТЬ ЗАКАЗЧИКА =====
         elif text == '⭐ Оценить заказчика':
             msg = bot.reply_to(message, "Введите ID заказчика (число):")
             bot.register_next_step_handler(msg, mod_rate_customer_get)
         
-        # ===== АРБИТРАЖ =====
         elif text == '⚖️ Арбитраж':
             c = db.execute("SELECT id, zakazchik_name, address, status FROM orders WHERE status IN ('in_progress', 'completed')")
             if c is None:
@@ -1140,7 +1114,6 @@ def moderator_commands(message):
             
             bot.reply_to(message, msg_text)
         
-        # ===== БЛОКИРОВКА =====
         elif text == '🔒 Блокировка':
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.row(KeyboardButton("По ID"), KeyboardButton("По телефону"))
@@ -1148,7 +1121,6 @@ def moderator_commands(message):
             msg = bot.reply_to(message, "🔒 Выберите способ блокировки:", reply_markup=kb)
             bot.register_next_step_handler(msg, mod_block_choose_method)
         
-        # ===== РАЗБЛОКИРОВКА =====
         elif text == '🔓 Разблокировка':
             msg = bot.reply_to(message, "Введите ID пользователя для разблокировки:")
             bot.register_next_step_handler(msg, mod_unblock_by_id)
@@ -1638,12 +1610,10 @@ def fallback(message):
         uid = message.from_user.id
         user = get_user(uid)
         
-        # Проверяем, есть ли пользователь в БД
         if not user:
             bot.reply_to(message, "Нажмите /start для начала работы.", reply_markup=get_main_kb(uid))
             return
         
-        # Если пользователь - модератор, показываем панель модератора
         if user[6] == 'moderator' and uid in MODERATOR_IDS:
             bot.reply_to(message, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
         elif user[6] == 'rabotnik':
