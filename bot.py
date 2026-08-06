@@ -580,15 +580,13 @@ def role_choice(message):
         logging.error(f"Ошибка в role_choice: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
+# ========== ИСПРАВЛЕННАЯ КНОПКА НАЗАД ==========
 @bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
 def back_to_main(message):
     try:
         uid = message.from_user.id
-        user = get_user(uid)
-        if user and user[6] == 'moderator' and uid in MODERATOR_IDS:
-            bot.reply_to(message, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
-        else:
-            bot.reply_to(message, "📱 Главное меню:\n\nВыберите роль:", reply_markup=get_main_kb(uid))
+        # Всегда показываем главное меню, независимо от роли
+        bot.reply_to(message, "📱 Главное меню:\n\nВыберите роль:", reply_markup=get_main_kb(uid))
     except Exception as e:
         logging.error(f"Ошибка в back_to_main: {e}")
         bot.reply_to(message, "📱 Главное меню:", reply_markup=get_main_kb(None))
