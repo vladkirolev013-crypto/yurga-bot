@@ -1,22 +1,30 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 import logging
+import re
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+# ========== НАСТРОЙКИ ==========
 TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
 
-# ========== СПИСОК МОДЕРАТОРОВ ==========
+# СПИСОК МОДЕРАТОРОВ (владельцев)
 MODERATOR_IDS = [
     8746212340,  # Твой ID
 ]
 
+# НОМЕР СБП (пока заглушка, потом подставишь свой)
+SBP_PHONE = '+7XXXXXXXXXX'
+
+# Время ожидания подтверждения "на месте" (минуты)
+CONFIRM_TIMEOUT = 30
+
 bot = telebot.TeleBot(TOKEN)
+
+# ========== ЛОГИРОВАНИЕ ==========
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ========== КЛАСС БАЗЫ ДАННЫХ ==========
 class Database:
@@ -37,6 +45,7 @@ class Database:
             self.conn.row_factory = sqlite3.Row
             c = self.conn.cursor()
             
+            # Таблица users
             c.execute('''CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER UNIQUE,
@@ -52,6 +61,7 @@ class Database:
                 blocked INTEGER DEFAULT 0
             )''')
             
+            # Таблица orders с новыми статусами
             c.execute('''CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 zakazchik_id INTEGER,
@@ -63,14 +73,21 @@ class Database:
                 commission INTEGER,
                 payout_per_person INTEGER,
                 status TEXT DEFAULT 'open',
-                created_at TEXT
+                photo_file_id TEXT,
+                created_at TEXT,
+                paid_at TEXT,
+                completed_at TEXT
             )''')
             
+            # Таблица assignments
             c.execute('''CREATE TABLE IF NOT EXISTS assignments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_id INTEGER,
                 user_id INTEGER,
-                payout INTEGER
+                payout INTEGER,
+                confirmed INTEGER DEFAULT 0,
+                confirmed_at TEXT,
+                photo_file_id TEXT
             )''')
             
             self.conn.commit()
@@ -94,6 +111,19 @@ class Database:
             logging.error(f"Ошибка commit: {e}")
 
 db = Database()
+
+# ========== СТАТУСЫ ЗАКАЗОВ ==========
+ORDER_STATUSES = {
+    'open': '🟢 Открыт',
+    'in_progress': '🟡 Сбор работников',
+    'ready_to_pay': '💰 Ожидает оплаты',
+    'paid': '✅ Оплачен',
+    'working': '🔧 Работы ведутся',
+    'waiting_approval': '📸 Ждёт подтверждения',
+    'waiting_payout': '💵 Ждёт выплаты',
+    'completed': '✅ Завершён',
+    'cancelled': '❌ Отменён'
+}
 
 # ========== ФУНКЦИИ РАБОТЫ С БД ==========
 def get_user(telegram_id):
@@ -152,33 +182,34 @@ def get_order(order_id):
                 row['id'], row['zakazchik_id'], row['zakazchik_name'], 
                 row['address'], row['hours'], row['people'], 
                 row['total_sum'], row['commission'], row['payout_per_person'], 
-                row['status'], row['created_at']
+                row['status'], row['photo_file_id'], row['created_at'],
+                row['paid_at'], row['completed_at']
             ]
         return None
     except Exception as e:
         logging.error(f"Ошибка get_order: {e}")
         return None
 
-def get_open_orders():
+def get_assignments(order_id):
     try:
-        c = db.execute("SELECT id, payout_per_person FROM orders WHERE status = 'open' ORDER BY created_at DESC")
+        c = db.execute("SELECT user_id, confirmed FROM assignments WHERE order_id = ?", (order_id,))
         if c is None:
             return []
         rows = c.fetchall()
-        return [[row['id'], row['payout_per_person']] for row in rows]
+        return [[row['user_id'], row['confirmed']] for row in rows]
     except Exception as e:
-        logging.error(f"Ошибка get_open_orders: {e}")
+        logging.error(f"Ошибка get_assignments: {e}")
         return []
 
-def get_assignments(order_id):
+def get_assignments_with_photo(order_id):
     try:
-        c = db.execute("SELECT user_id FROM assignments WHERE order_id = ?", (order_id,))
+        c = db.execute("SELECT user_id, photo_file_id FROM assignments WHERE order_id = ? AND photo_file_id IS NOT NULL", (order_id,))
         if c is None:
             return []
         rows = c.fetchall()
         return [row['user_id'] for row in rows]
     except Exception as e:
-        logging.error(f"Ошибка get_assignments: {e}")
+        logging.error(f"Ошибка get_assignments_with_photo: {e}")
         return []
 
 def get_workers():
@@ -192,46 +223,80 @@ def get_workers():
         logging.error(f"Ошибка get_workers: {e}")
         return []
 
-def cancel_order(order_id):
+def get_worker_orders(user_id):
     try:
-        db.execute("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'open'", (order_id,))
+        c = db.execute('''SELECT o.id, o.status, a.payout, o.zakazchik_name, o.address, a.confirmed
+                     FROM assignments a 
+                     JOIN orders o ON a.order_id = o.id 
+                     WHERE a.user_id = ?
+                     ORDER BY o.created_at DESC''', (user_id,))
+        if c is None:
+            return []
+        rows = c.fetchall()
+        return [[row['id'], row['status'], row['payout'], row['zakazchik_name'], row['address'], row['confirmed']] for row in rows]
+    except Exception as e:
+        logging.error(f"Ошибка get_worker_orders: {e}")
+        return []
+
+def get_customer_orders(zakazchik_id):
+    try:
+        c = db.execute("SELECT id, total_sum, status, created_at FROM orders WHERE zakazchik_id = ? ORDER BY created_at DESC", (zakazchik_id,))
+        if c is None:
+            return []
+        rows = c.fetchall()
+        return [[row['id'], row['total_sum'], row['status'], row['created_at']] for row in rows]
+    except Exception as e:
+        logging.error(f"Ошибка get_customer_orders: {e}")
+        return []
+
+def get_workers_for_order(order_id):
+    try:
+        c = db.execute("SELECT user_id FROM assignments WHERE order_id = ?", (order_id,))
+        if c is None:
+            return []
+        rows = c.fetchall()
+        return [row['user_id'] for row in rows]
+    except Exception as e:
+        logging.error(f"Ошибка get_workers_for_order: {e}")
+        return []
+
+def update_order_status(order_id, status):
+    try:
+        db.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
         db.commit()
         return True
     except Exception as e:
-        logging.error(f"Ошибка cancel_order: {e}")
+        logging.error(f"Ошибка update_order_status: {e}")
         return False
 
-def add_rating(user_id, delta):
+def confirm_worker_on_place(order_id, user_id):
     try:
-        db.execute("UPDATE users SET rating = rating + ? WHERE id = ?", (delta, user_id))
+        db.execute("UPDATE assignments SET confirmed = 1, confirmed_at = ? WHERE order_id = ? AND user_id = ?", 
+                  (datetime.now().isoformat(), order_id, user_id))
         db.commit()
         return True
     except Exception as e:
-        logging.error(f"Ошибка add_rating: {e}")
+        logging.error(f"Ошибка confirm_worker_on_place: {e}")
         return False
 
-def rate_customer(customer_id, delta):
+def set_order_photo(order_id, photo_file_id):
     try:
-        db.execute("UPDATE users SET customer_rating = customer_rating + ? WHERE id = ?", (delta, customer_id))
+        db.execute("UPDATE orders SET photo_file_id = ? WHERE id = ?", (photo_file_id, order_id))
         db.commit()
-        c = db.execute("SELECT customer_rating, telegram_id FROM users WHERE id = ?", (customer_id,))
-        if c:
-            row = c.fetchone()
-            if row:
-                return [row['customer_rating'], row['telegram_id']]
-        return None
+        return True
     except Exception as e:
-        logging.error(f"Ошибка rate_customer: {e}")
-        return None
+        logging.error(f"Ошибка set_order_photo: {e}")
+        return False
 
-def block_user_by_phone(phone):
+def set_worker_photo(order_id, user_id, photo_file_id):
     try:
-        db.execute("UPDATE users SET blocked = 1 WHERE phone = ?", (phone,))
+        db.execute("UPDATE assignments SET photo_file_id = ? WHERE order_id = ? AND user_id = ?", 
+                  (photo_file_id, order_id, user_id))
         db.commit()
-        return 1
+        return True
     except Exception as e:
-        logging.error(f"Ошибка block_user_by_phone: {e}")
-        return 0
+        logging.error(f"Ошибка set_worker_photo: {e}")
+        return False
 
 def get_all_workers():
     try:
@@ -255,37 +320,32 @@ def get_all_customers():
         logging.error(f"Ошибка get_all_customers: {e}")
         return []
 
-def get_customer_orders_with_details(zakazchik_id):
+def block_user_by_phone(phone):
     try:
-        c = db.execute("""SELECT o.id, o.total_sum, o.status, o.people,
-                            COUNT(a.user_id) as taken
-                     FROM orders o
-                     LEFT JOIN assignments a ON o.id = a.order_id
-                     WHERE o.zakazchik_id = ?
-                     GROUP BY o.id
-                     ORDER BY o.created_at DESC""", (zakazchik_id,))
-        if c is None:
-            return []
-        rows = c.fetchall()
-        return [[row['id'], row['total_sum'], row['status'], row['people'], row['taken']] for row in rows]
+        db.execute("UPDATE users SET blocked = 1 WHERE phone = ?", (phone,))
+        db.commit()
+        return 1
     except Exception as e:
-        logging.error(f"Ошибка get_customer_orders_with_details: {e}")
-        return []
+        logging.error(f"Ошибка block_user_by_phone: {e}")
+        return 0
 
-def get_worker_orders(user_id):
+def add_rating(user_id, delta):
     try:
-        c = db.execute('''SELECT o.id, o.status, a.payout, o.zakazchik_name, o.address
-                     FROM assignments a 
-                     JOIN orders o ON a.order_id = o.id 
-                     WHERE a.user_id = ?
-                     ORDER BY o.created_at DESC''', (user_id,))
-        if c is None:
-            return []
-        rows = c.fetchall()
-        return [[row['id'], row['status'], row['payout'], row['zakazchik_name'], row['address']] for row in rows]
+        db.execute("UPDATE users SET rating = rating + ? WHERE id = ?", (delta, user_id))
+        db.commit()
+        return True
     except Exception as e:
-        logging.error(f"Ошибка get_worker_orders: {e}")
-        return []
+        logging.error(f"Ошибка add_rating: {e}")
+        return False
+
+def rate_customer(customer_id, delta):
+    try:
+        db.execute("UPDATE users SET customer_rating = customer_rating + ? WHERE id = ?", (delta, customer_id))
+        db.commit()
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка rate_customer: {e}")
+        return False
 
 # ========== КЛАВИАТУРЫ ==========
 _main_kb = None
@@ -297,10 +357,8 @@ _blocked_kb = None
 def get_main_kb(telegram_id=None):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("👷 Я работник"), KeyboardButton("🏢 Я заказчик"))
-    
     if telegram_id and telegram_id in MODERATOR_IDS:
         kb.row(KeyboardButton("🛡️ Я модератор"))
-    
     return kb
 
 def get_worker_kb():
@@ -308,8 +366,9 @@ def get_worker_kb():
     if _worker_kb is None:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📋 Свободные заказы"))
-        kb.row(KeyboardButton("💰 Мои выплаты"), KeyboardButton("👤 Профиль"))
-        kb.row(KeyboardButton("🔄 Сменить смену"), KeyboardButton("⬅️ Назад"))
+        kb.row(KeyboardButton("💰 Мои выплаты"), KeyboardButton("📋 Мои заказы"))
+        kb.row(KeyboardButton("👤 Профиль"), KeyboardButton("🔄 Сменить смену"))
+        kb.row(KeyboardButton("⬅️ Назад"))
         _worker_kb = kb
     return _worker_kb
 
@@ -355,8 +414,35 @@ def order_inline_kb(order_id, is_customer=False):
 
 def confirm_take_kb(order_id):
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_take_{order_id}"))
-    kb.add(InlineKeyboardButton("❌ Отмена", callback_data="cancel_take"))
+    kb.add(InlineKeyboardButton("📍 Я на месте", callback_data=f"confirm_place_{order_id}"))
+    kb.add(InlineKeyboardButton("❌ Отказаться", callback_data=f"cancel_take_{order_id}"))
+    return kb
+
+def payment_kb(order_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Я оплатил", callback_data=f"i_paid_{order_id}"))
+    kb.add(InlineKeyboardButton("❌ Отменить заказ", callback_data=f"cancel_{order_id}"))
+    return kb
+
+def worker_photo_kb(order_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📸 Отправить фото", callback_data=f"send_photo_{order_id}"))
+    return kb
+
+def approve_kb(order_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Работа выполнена", callback_data=f"approve_{order_id}"))
+    kb.add(InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{order_id}"))
+    return kb
+
+def moderator_payment_kb(order_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"confirm_payment_{order_id}"))
+    return kb
+
+def moderator_payout_kb(order_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
     return kb
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
@@ -378,7 +464,7 @@ def start(message):
             return
         
         if user[11] == 1:
-            bot.reply_to(message, "⛔ Ваш аккаунт заблокирован модератором.\nДля связи нажмите кнопку ниже:", reply_markup=get_blocked_kb())
+            bot.reply_to(message, "⛔ Ваш аккаунт заблокирован.", reply_markup=get_blocked_kb())
             return
         
         role = user[6]
@@ -465,14 +551,35 @@ def reg_start(message):
         reg_data[uid] = {}
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
-        bot.send_message(message.chat.id,
-            "📜 УСЛОВИЯ СЕРВИСА\n\n"
-            "1. Сервис - посредник между заказчиками и работниками\n"
-            "2. Гарантируем выплату работникам при выполнении заказа\n"
-            "3. Гарантируем возврат денег заказчикам при неявке работников\n"
-            "4. Сервис не отвечает за качество работы, травмы, кражи\n"
-            "5. Оплата наличными отменяет все гарантии\n\n"
-            "✅ Принимаете условия?", reply_markup=kb)
+        
+        if role == 'rabotnik':
+            text = """📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)
+
+1. Сервис - посредник между заказчиками и работниками
+2. Вы берёте заказ только если готовы выполнить его качественно
+3. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте (кнопка "Я на месте")
+4. Без подтверждения "на месте" - заказчик не оплачивает, вы не получаете выплату
+5. После выполнения работы отправьте ФОТО выполненной работы
+6. Без фото - заказчик не подтвердит выполнение, вы не получите выплату
+7. Сервис гарантирует выплату после подтверждения заказчиком
+8. Сервис не отвечает за травмы, кражи, качество вашей работы
+
+✅ Принимаете условия?"""
+        else:
+            text = """📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)
+
+1. Сервис - посредник между заказчиками и работниками
+2. После создания заказа работники сами решают брать его или нет
+3. После комплектации заказа вы переводите деньги на СБП сервиса
+4. Деньги хранятся на счёте сервиса до полного выполнения заказа
+5. Если работники сорвали сделку - деньги возвращаются в полном объёме
+6. После выполнения работы вы подтверждаете её качество
+7. Только после вашего подтверждения мы переводим деньги работникам
+8. Сервис не отвечает за качество работы, травмы, кражи
+
+✅ Принимаете условия?"""
+        
+        bot.send_message(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logging.error(f"Ошибка в reg_start: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -497,10 +604,10 @@ def handle_agreement(message):
         role = user[6]
         
         if role == 'rabotnik':
-            msg = bot.reply_to(message, "📝 Введите ваше ФИО (например: Иванов Иван Иванович):")
+            msg = bot.reply_to(message, "📝 Введите ваше ФИО:")
             bot.register_next_step_handler(msg, get_worker_name, uid)
         else:
-            msg = bot.reply_to(message, "📝 Введите ваше ФИО (например: Иванов Иван Иванович):")
+            msg = bot.reply_to(message, "📝 Введите ваше ФИО:")
             bot.register_next_step_handler(msg, get_customer_name, uid)
     except Exception as e:
         logging.error(f"Ошибка в handle_agreement: {e}")
@@ -518,7 +625,7 @@ def get_worker_name(message, uid):
 def get_worker_phone(message, uid):
     try:
         reg_data[uid]['phone'] = message.text
-        msg = bot.reply_to(message, "💳 Введите реквизиты карты для выплат (номер карты):")
+        msg = bot.reply_to(message, "💳 Введите номер карты для выплат:")
         bot.register_next_step_handler(msg, get_worker_bank, uid)
     except Exception as e:
         logging.error(f"Ошибка в get_worker_phone: {e}")
@@ -620,30 +727,60 @@ def free_orders(message):
             bot.reply_to(message, "❌ Пройдите регистрацию.")
             return
         
-        orders = get_open_orders()
-        if not orders:
+        c = db.execute("SELECT id, payout_per_person, address, hours, people FROM orders WHERE status = 'open' ORDER BY created_at DESC")
+        if c is None:
+            bot.reply_to(message, "📭 Нет свободных заказов.")
+            return
+        rows = c.fetchall()
+        
+        if not rows:
             bot.reply_to(message, "📭 Нет свободных заказов.")
             return
         
-        for o in orders:
-            order = get_order(o[0])
-            if not order:
-                continue
+        for row in rows:
             text = (
-                f"🆔 Заказ #{o[0]}\n"
-                f"💵 Выплата: {o[1]} ₽\n"
-                f"📍 Адрес: {order[3]}\n"
-                f"⏱ Часы: {order[4]} ч.\n"
-                f"👥 Нужно: {order[5]} чел.\n"
-                f"📊 Статус: {'🟢 Открыт' if order[9] == 'open' else '🟡 В работе'}"
+                f"🆔 Заказ #{row['id']}\n"
+                f"💵 Выплата: {row['payout_per_person']} ₽\n"
+                f"📍 Адрес: {row['address']}\n"
+                f"⏱ Часы: {row['hours']} ч.\n"
+                f"👥 Нужно: {row['people']} чел."
             )
             bot.send_message(
                 message.chat.id,
                 text,
-                reply_markup=order_inline_kb(o[0], is_customer=False)
+                reply_markup=order_inline_kb(row['id'], is_customer=False)
             )
     except Exception as e:
         logging.error(f"Ошибка в free_orders: {e}")
+        bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
+
+@bot.message_handler(func=lambda m: m.text == '📋 Мои заказы')
+def my_worker_orders(message):
+    try:
+        uid = message.from_user.id
+        user = get_user(uid)
+        
+        if not user or user[6] != 'rabotnik':
+            bot.reply_to(message, "❌ Эта функция только для работников.")
+            return
+        
+        orders = get_worker_orders(user[0])
+        if not orders:
+            bot.reply_to(message, "📭 У вас нет активных заказов.")
+            return
+        
+        for o in orders:
+            status_text = ORDER_STATUSES.get(o[1], o[1])
+            text = (
+                f"🆔 Заказ #{o[0]}\n"
+                f"📊 Статус: {status_text}\n"
+                f"💵 Выплата: {o[2]} ₽\n"
+                f"👤 Заказчик: {o[3]}\n"
+                f"📍 Адрес: {o[4]}"
+            )
+            bot.send_message(message.chat.id, text)
+    except Exception as e:
+        logging.error(f"Ошибка в my_worker_orders: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 @bot.message_handler(func=lambda m: m.text == '💰 Мои выплаты')
@@ -656,21 +793,24 @@ def my_payouts(message):
             bot.reply_to(message, "❌ Эта функция только для работников.")
             return
         
-        orders = get_worker_orders(user[0])
-        if not orders:
-            bot.reply_to(message, "💰 У вас пока нет выплат.")
-            return
+        c = db.execute("SELECT SUM(payout) FROM assignments WHERE user_id = ?", (user[0],))
+        if c:
+            total = c.fetchone()[0] or 0
+        else:
+            total = 0
         
-        total = 0
-        text = "💰 ВАШИ ВЫПЛАТЫ:\n\n"
-        for o in orders:
-            status_map = {'open': '🟢 Ожидает', 'in_progress': '🟡 В работе', 'completed': '✅ Выплачено', 'cancelled': '❌ Отменён'}
-            text += f"Заказ #{o[0]}: {o[2]}₽, {status_map.get(o[1], o[1])}\n"
-            if o[1] == 'completed':
-                total += o[2]
+        c = db.execute("SELECT COUNT(*) FROM assignments WHERE user_id = ?", (user[0],))
+        if c:
+            count = c.fetchone()[0] or 0
+        else:
+            count = 0
         
-        text += f"\n💰 Итого выплачено: {total}₽"
-        bot.reply_to(message, text)
+        bot.reply_to(
+            message,
+            f"💰 ВАШИ ВЫПЛАТЫ\n\n"
+            f"💵 Всего выплачено: {total} ₽\n"
+            f"👥 Количество заказов: {count}"
+        )
     except Exception as e:
         logging.error(f"Ошибка в my_payouts: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -704,6 +844,7 @@ def profile(message):
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 # ========== ЗАКАЗЧИК ==========
+
 @bot.message_handler(func=lambda m: m.text == '📝 Создать заказ')
 def create_order_start(message):
     try:
@@ -777,31 +918,28 @@ def get_order_people(message, uid):
         conn = db.conn
         c = conn.cursor()
         c.execute('''INSERT INTO orders 
-                     (zakazchik_id, zakazchik_name, address, hours, people, total_sum, commission, payout_per_person, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (user[0], name, address, hours, people, total, commission, payout, datetime.now().isoformat()))
+                     (zakazchik_id, zakazchik_name, address, hours, people, total_sum, commission, payout_per_person, status, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (user[0], name, address, hours, people, total, commission, payout, 'open', datetime.now().isoformat()))
         conn.commit()
         order_id = c.lastrowid
         
         del order_data[uid]
         
-        # =====================================================
-        # ЗАКАЗЧИКУ - ТОЛЬКО СУММА К ОПЛАТЕ, БЕЗ КОМИССИИ И ВЫПЛАТЫ
-        # =====================================================
+        # ===== ЗАКАЗЧИКУ =====
         bot.reply_to(
             message, 
             f"✅ ЗАКАЗ #{order_id} СОЗДАН!\n\n"
-            f"💰 Сумма к оплате: {total} ₽\n"
-            f"🙏 Работникам будет выплачено\n"
             f"📍 Адрес: {address}\n"
             f"⏱ Часы: {hours} ч.\n"
-            f"👥 Человек: {people}",
+            f"👥 Нужно: {people} чел.\n"
+            f"💰 Сумма к оплате: {total} ₽\n\n"
+            f"📌 Ожидайте, пока работники соберутся.\n"
+            f"Вы получите уведомление, когда все будут на месте.",
             reply_markup=get_customer_kb()
         )
         
-        # =====================================================
-        # РАБОТНИКАМ - ТОЛЬКО ИХ ВЫПЛАТА, БЕЗ КОМИССИИ
-        # =====================================================
+        # ===== РАБОТНИКАМ =====
         workers = get_workers()
         if workers:
             text = (
@@ -818,9 +956,7 @@ def get_order_people(message, uid):
                 except Exception as e:
                     logging.error(f"Ошибка отправки уведомления работнику {w}: {e}")
         
-        # =====================================================
-        # МОДЕРАТОРАМ - ВСЯ ИНФОРМАЦИЯ С КОМИССИЕЙ
-        # =====================================================
+        # ===== МОДЕРАТОРУ =====
         for m in MODERATOR_IDS:
             try:
                 bot.send_message(
@@ -831,9 +967,8 @@ def get_order_people(message, uid):
                     f"⏱ Часы: {hours} ч.\n"
                     f"👥 Человек: {people}\n"
                     f"💰 Сумма: {total} ₽\n"
-                    f"📊 Комиссия сервиса: {commission} ₽\n"
-                    f"💵 Выплата работнику: {payout} ₽/чел\n"
-                    f"📊 Итого к выплате: {payout * people} ₽"
+                    f"📊 Комиссия: {commission} ₽\n"
+                    f"💵 Выплата: {payout} ₽/чел"
                 )
             except:
                 pass
@@ -856,35 +991,19 @@ def my_orders_customer(message):
             bot.reply_to(message, "❌ Эта функция только для заказчиков.")
             return
         
-        orders = get_customer_orders_with_details(user[0])
+        orders = get_customer_orders(user[0])
         if not orders:
             bot.reply_to(message, "📭 У вас нет заказов.")
             return
         
-        status_map = {
-            'open': '🟢 Открыт',
-            'in_progress': '🟡 В работе',
-            'completed': '✅ Завершён',
-            'cancelled': '❌ Отменён'
-        }
-        
         for o in orders:
-            # ===== ЗАКАЗЧИК НЕ ВИДИТ ВЫПЛАТУ! =====
+            status_text = ORDER_STATUSES.get(o[2], o[2])
             text = (
                 f"🆔 Заказ #{o[0]}\n"
                 f"💰 Сумма: {o[1]} ₽\n"
-                f"📊 Статус: {status_map.get(o[2], o[2])}\n"
-                f"👥 Работников: {o[4]}/{o[3]}"
+                f"📊 Статус: {status_text}"
             )
-            
-            if o[2] in ('open', 'in_progress'):
-                bot.send_message(
-                    message.chat.id,
-                    text,
-                    reply_markup=order_inline_kb(o[0], is_customer=True)
-                )
-            else:
-                bot.send_message(message.chat.id, text)
+            bot.send_message(message.chat.id, text)
     except Exception as e:
         logging.error(f"Ошибка в my_orders_customer: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -922,6 +1041,7 @@ def send_complaint(message, uid):
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 # ========== МОДЕРАТОР ==========
+
 @bot.message_handler(func=lambda m: m.text in [
     '💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', 
     '🏢 Заказчики', '📊 Статистика', '⭐ Оценить работника', '⭐ Оценить заказчика',
@@ -940,45 +1060,29 @@ def moderator_commands(message):
         
         if text == '💰 Выплаты':
             c = db.execute("SELECT SUM(payout) FROM assignments")
-            if c:
-                total = c.fetchone()[0] or 0
-            else:
-                total = 0
-                
+            total = c.fetchone()[0] if c else 0
             c = db.execute("SELECT COUNT(*) FROM assignments")
-            if c:
-                count = c.fetchone()[0] or 0
-            else:
-                count = 0
-            
-            bot.reply_to(
-                message,
-                f"💰 СТАТИСТИКА ВЫПЛАТ\n\n"
-                f"💵 Всего выплачено: {total} ₽\n"
-                f"👥 Количество выплат: {count}"
-            )
+            count = c.fetchone()[0] if c else 0
+            bot.reply_to(message, f"💰 ВСЕГО ВЫПЛАЧЕНО\n\n💵 {total} ₽\n👥 {count} выплат")
         
         elif text == '🟡 Активные':
-            c = db.execute("SELECT * FROM orders WHERE status IN ('open', 'in_progress') ORDER BY created_at DESC")
+            c = db.execute("SELECT * FROM orders WHERE status NOT IN ('completed', 'cancelled') ORDER BY created_at DESC")
             if c is None:
                 bot.reply_to(message, "🟡 Нет активных заказов.")
                 return
             rows = c.fetchall()
-            
             if not rows:
                 bot.reply_to(message, "🟡 Нет активных заказов.")
                 return
-            
             for row in rows:
+                status_text = ORDER_STATUSES.get(row['status'], row['status'])
                 msg_text = (
                     f"🆔 Заказ #{row['id']}\n"
                     f"👤 Заказчик: {row['zakazchik_name']}\n"
                     f"📍 Адрес: {row['address']}\n"
-                    f"⏱ Часы: {row['hours']}, 👥 {row['people']} чел.\n"
+                    f"📊 Статус: {status_text}\n"
                     f"💰 Сумма: {row['total_sum']} ₽\n"
-                    f"📊 Комиссия: {row['commission']} ₽\n"
-                    f"💵 Выплата: {row['payout_per_person']} ₽/чел\n"
-                    f"📊 Статус: {'🟢 Открыт' if row['status'] == 'open' else '🟡 В работе'}"
+                    f"💵 Выплата: {row['payout_per_person']} ₽/чел"
                 )
                 bot.send_message(message.chat.id, msg_text)
         
@@ -988,20 +1092,15 @@ def moderator_commands(message):
                 bot.reply_to(message, "✅ Нет завершённых заказов.")
                 return
             rows = c.fetchall()
-            
             if not rows:
                 bot.reply_to(message, "✅ Нет завершённых заказов.")
                 return
-            
             for row in rows:
                 msg_text = (
                     f"✅ Заказ #{row['id']}\n"
                     f"👤 Заказчик: {row['zakazchik_name']}\n"
                     f"📍 Адрес: {row['address']}\n"
-                    f"⏱ Часы: {row['hours']}, 👥 {row['people']} чел.\n"
-                    f"💰 Сумма: {row['total_sum']} ₽\n"
-                    f"📊 Комиссия: {row['commission']} ₽\n"
-                    f"💵 Выплата: {row['payout_per_person']} ₽/чел"
+                    f"💰 Сумма: {row['total_sum']} ₽"
                 )
                 bot.send_message(message.chat.id, msg_text)
         
@@ -1010,17 +1109,12 @@ def moderator_commands(message):
             if not workers:
                 bot.reply_to(message, "👥 Нет работников.")
                 return
-            
-            msg_text = "👥 СПИСОК РАБОТНИКОВ:\n\n"
+            msg_text = "👥 РАБОТНИКИ:\n\n"
             for w in workers[:20]:
                 status = "🟢" if w[5] else "🔴"
                 block = "🔒" if w[4] else "✅"
                 msg_text += f"{status} {block} ID {w[0]}: {w[1]}\n"
                 msg_text += f"   📞 {w[2]}, ⭐ {w[3]}\n"
-            
-            if len(workers) > 20:
-                msg_text += f"\n... и ещё {len(workers)-20} работников"
-            
             bot.reply_to(message, msg_text)
         
         elif text == '🏢 Заказчики':
@@ -1028,112 +1122,80 @@ def moderator_commands(message):
             if not customers:
                 bot.reply_to(message, "🏢 Нет заказчиков.")
                 return
-            
-            msg_text = "🏢 СПИСОК ЗАКАЗЧИКОВ:\n\n"
+            msg_text = "🏢 ЗАКАЗЧИКИ:\n\n"
             for c in customers[:20]:
                 block = "🔒" if c[4] else "✅"
                 msg_text += f"{block} ID {c[0]}: {c[1]}\n"
                 msg_text += f"   📞 {c[2]}, ⭐ {c[3]}\n"
-            
-            if len(customers) > 20:
-                msg_text += f"\n... и ещё {len(customers)-20} заказчиков"
-            
             bot.reply_to(message, msg_text)
         
         elif text == '📊 Статистика':
             c = db.execute("SELECT COUNT(*) FROM users")
             total_users = c.fetchone()[0] if c else 0
-            
             c = db.execute("SELECT COUNT(*) FROM users WHERE role = 'rabotnik'")
             workers = c.fetchone()[0] if c else 0
-            
             c = db.execute("SELECT COUNT(*) FROM users WHERE role = 'zakazchik'")
             customers = c.fetchone()[0] if c else 0
-            
             c = db.execute("SELECT COUNT(*) FROM orders")
             total_orders = c.fetchone()[0] if c else 0
-            
             c = db.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed'")
             completed = c.fetchone()[0] if c else 0
-            
-            c = db.execute("SELECT COUNT(*) FROM orders WHERE status = 'open'")
-            open_orders = c.fetchone()[0] if c else 0
-            
-            c = db.execute("SELECT COUNT(*) FROM orders WHERE status = 'in_progress'")
-            in_progress = c.fetchone()[0] if c else 0
-            
             c = db.execute("SELECT COUNT(*) FROM orders WHERE status = 'cancelled'")
             cancelled = c.fetchone()[0] if c else 0
-            
             c = db.execute("SELECT SUM(payout) FROM assignments")
             total_payouts = c.fetchone()[0] if c else 0
-            if total_payouts is None:
-                total_payouts = 0
-            
-            c = db.execute("SELECT SUM(commission) FROM orders WHERE status = 'completed'")
-            total_commission = c.fetchone()[0] if c else 0
-            if total_commission is None:
-                total_commission = 0
             
             msg_text = (
                 f"📊 СТАТИСТИКА\n\n"
-                f"👥 Всего пользователей: {total_users}\n"
+                f"👥 Всего: {total_users}\n"
                 f"👷 Работников: {workers}\n"
                 f"🏢 Заказчиков: {customers}\n\n"
-                f"📦 Всего заказов: {total_orders}\n"
-                f"🟢 Открытых: {open_orders}\n"
-                f"🟡 В работе: {in_progress}\n"
+                f"📦 Заказов: {total_orders}\n"
                 f"✅ Завершённых: {completed}\n"
                 f"❌ Отменённых: {cancelled}\n\n"
-                f"💰 Выплачено: {total_payouts} ₽\n"
-                f"📊 Комиссия собрана: {total_commission} ₽"
+                f"💰 Выплачено: {total_payouts} ₽"
             )
             bot.reply_to(message, msg_text)
         
         elif text == '⭐ Оценить работника':
-            msg = bot.reply_to(message, "Введите ID работника (число):")
+            msg = bot.reply_to(message, "Введите ID работника:")
             bot.register_next_step_handler(msg, mod_rate_get_user)
         
         elif text == '⭐ Оценить заказчика':
-            msg = bot.reply_to(message, "Введите ID заказчика (число):")
+            msg = bot.reply_to(message, "Введите ID заказчика:")
             bot.register_next_step_handler(msg, mod_rate_customer_get)
         
         elif text == '⚖️ Арбитраж':
-            c = db.execute("SELECT id, zakazchik_name, address, status FROM orders WHERE status IN ('in_progress', 'completed')")
+            c = db.execute("SELECT id, zakazchik_name, address, status FROM orders WHERE status IN ('waiting_approval', 'waiting_payout')")
             if c is None:
                 bot.reply_to(message, "⚖️ Нет заказов для арбитража.")
                 return
             rows = c.fetchall()
-            
             if not rows:
                 bot.reply_to(message, "⚖️ Нет заказов для арбитража.")
                 return
-            
-            msg_text = "⚖️ ДОСТУПНЫЕ ЗАКАЗЫ\n\n"
+            msg_text = "⚖️ АРБИТРАЖ\n\n"
             for row in rows:
-                msg_text += f"🆔 #{row['id']} | {row['zakazchik_name']} | {row['address']}\nСтатус: {row['status']}\n\n"
-            
-            msg_text += "📝 Команды:\n/arbitrate ID refund|penalty|ban\n\n"
-            msg_text += "refund - вернуть деньги\n"
-            msg_text += "penalty - понизить рейтинг заказчика\n"
-            msg_text += "ban - заблокировать заказчика"
-            
+                msg_text += f"🆔 #{row['id']} | {row['zakazchik_name']}\n📍 {row['address']}\nСтатус: {row['status']}\n\n"
+            msg_text += "/arbitrate ID refund|penalty|ban"
             bot.reply_to(message, msg_text)
         
         elif text == '🔒 Блокировка':
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.row(KeyboardButton("По ID"), KeyboardButton("По телефону"))
             kb.row(KeyboardButton("⬅️ Назад"))
-            msg = bot.reply_to(message, "🔒 Выберите способ блокировки:", reply_markup=kb)
+            msg = bot.reply_to(message, "🔒 Выберите способ:", reply_markup=kb)
             bot.register_next_step_handler(msg, mod_block_choose_method)
         
         elif text == '🔓 Разблокировка':
-            msg = bot.reply_to(message, "Введите ID пользователя для разблокировки:")
+            msg = bot.reply_to(message, "Введите ID пользователя:")
             bot.register_next_step_handler(msg, mod_unblock_by_id)
             
     except Exception as e:
         logging.error(f"Ошибка в moderator_commands: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ МОДЕРАТОРА ==========
 
 def mod_rate_get_user(message):
     try:
@@ -1142,27 +1204,18 @@ def mod_rate_get_user(message):
         except:
             bot.reply_to(message, "❌ Введите число.", reply_markup=get_moderator_kb())
             return
-        
         c = db.execute("SELECT id, name, rating FROM users WHERE id = ? AND role = 'rabotnik'", (user_id,))
         if c is None:
             bot.reply_to(message, "❌ Работник не найден.", reply_markup=get_moderator_kb())
             return
         row = c.fetchone()
-        
         if not row:
             bot.reply_to(message, "❌ Работник не найден.", reply_markup=get_moderator_kb())
             return
-        
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("➕ +1"), KeyboardButton("➖ -1"), KeyboardButton("⏺ 0"))
         kb.row(KeyboardButton("⬅️ Назад"))
-        msg = bot.reply_to(
-            message,
-            f"⭐ Оценка для {row['name']}\n"
-            f"Текущий рейтинг: {row['rating']}\n\n"
-            f"Выберите оценку:",
-            reply_markup=kb
-        )
+        msg = bot.reply_to(message, f"⭐ {row['name']} (рейтинг: {row['rating']})", reply_markup=kb)
         bot.register_next_step_handler(msg, mod_rate_apply, row['id'])
     except Exception as e:
         logging.error(f"Ошибка в mod_rate_get_user: {e}")
@@ -1173,17 +1226,11 @@ def mod_rate_apply(message, user_id):
         if message.text not in ('➕ +1', '➖ -1', '⏺ 0'):
             bot.reply_to(message, "❌ Нажмите кнопку.", reply_markup=get_moderator_kb())
             return
-        
         delta = {'➕ +1': 1, '➖ -1': -1, '⏺ 0': 0}[message.text]
         add_rating(user_id, delta)
-        
         c = db.execute("SELECT rating FROM users WHERE id = ?", (user_id,))
-        if c:
-            new_rating = c.fetchone()[0]
-        else:
-            new_rating = "неизвестно"
-        
-        bot.reply_to(message, f"✅ Рейтинг обновлён: {new_rating}", reply_markup=get_moderator_kb())
+        new_rating = c.fetchone()[0] if c else "неизвестно"
+        bot.reply_to(message, f"✅ Рейтинг: {new_rating}", reply_markup=get_moderator_kb())
     except Exception as e:
         logging.error(f"Ошибка в mod_rate_apply: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -1195,27 +1242,18 @@ def mod_rate_customer_get(message):
         except:
             bot.reply_to(message, "❌ Введите число.", reply_markup=get_moderator_kb())
             return
-        
         c = db.execute("SELECT id, name, customer_rating FROM users WHERE id = ? AND role = 'zakazchik'", (customer_id,))
         if c is None:
             bot.reply_to(message, "❌ Заказчик не найден.", reply_markup=get_moderator_kb())
             return
         row = c.fetchone()
-        
         if not row:
             bot.reply_to(message, "❌ Заказчик не найден.", reply_markup=get_moderator_kb())
             return
-        
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("➕ +1"), KeyboardButton("➖ -1"), KeyboardButton("⏺ 0"))
         kb.row(KeyboardButton("⬅️ Назад"))
-        msg = bot.reply_to(
-            message,
-            f"⭐ Оценка для {row['name']}\n"
-            f"Текущий рейтинг: {row['customer_rating']}\n\n"
-            f"Выберите оценку:",
-            reply_markup=kb
-        )
+        msg = bot.reply_to(message, f"⭐ {row['name']} (рейтинг: {row['customer_rating']})", reply_markup=kb)
         bot.register_next_step_handler(msg, mod_rate_customer_apply, row['id'])
     except Exception as e:
         logging.error(f"Ошибка в mod_rate_customer_get: {e}")
@@ -1226,14 +1264,11 @@ def mod_rate_customer_apply(message, customer_id):
         if message.text not in ('➕ +1', '➖ -1', '⏺ 0'):
             bot.reply_to(message, "❌ Нажмите кнопку.", reply_markup=get_moderator_kb())
             return
-        
         delta = {'➕ +1': 1, '➖ -1': -1, '⏺ 0': 0}[message.text]
-        row = rate_customer(customer_id, delta)
-        
-        if row:
-            bot.reply_to(message, f"✅ Рейтинг заказчика обновлён: {row[0]}", reply_markup=get_moderator_kb())
-        else:
-            bot.reply_to(message, "❌ Ошибка", reply_markup=get_moderator_kb())
+        rate_customer(customer_id, delta)
+        c = db.execute("SELECT customer_rating FROM users WHERE id = ?", (customer_id,))
+        new_rating = c.fetchone()[0] if c else "неизвестно"
+        bot.reply_to(message, f"✅ Рейтинг заказчика: {new_rating}", reply_markup=get_moderator_kb())
     except Exception as e:
         logging.error(f"Ошибка в mod_rate_customer_apply: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -1243,12 +1278,11 @@ def mod_block_choose_method(message):
         if message.text == '⬅️ Назад':
             bot.reply_to(message, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
             return
-        
         if message.text == 'По ID':
             msg = bot.reply_to(message, "Введите ID пользователя:")
             bot.register_next_step_handler(msg, mod_block_by_id)
         elif message.text == 'По телефону':
-            msg = bot.reply_to(message, "Введите номер телефона (в формате +7XXXXXXXXXX):")
+            msg = bot.reply_to(message, "Введите номер телефона:")
             bot.register_next_step_handler(msg, mod_block_by_phone)
         else:
             bot.reply_to(message, "❌ Нажмите кнопку.", reply_markup=get_moderator_kb())
@@ -1263,24 +1297,19 @@ def mod_block_by_id(message):
         except:
             bot.reply_to(message, "❌ Введите число.", reply_markup=get_moderator_kb())
             return
-        
         c = db.execute("SELECT id, name, telegram_id FROM users WHERE id = ?", (user_id,))
         if c is None:
             bot.reply_to(message, "❌ Пользователь не найден.", reply_markup=get_moderator_kb())
             return
         row = c.fetchone()
-        
         if not row:
             bot.reply_to(message, "❌ Пользователь не найден.", reply_markup=get_moderator_kb())
             return
-        
         db.execute("UPDATE users SET blocked = 1 WHERE id = ?", (user_id,))
         db.commit()
-        
-        bot.reply_to(message, f"✅ Пользователь {row['name']} (ID {row['id']}) заблокирован.", reply_markup=get_moderator_kb())
-        
+        bot.reply_to(message, f"✅ {row['name']} заблокирован.", reply_markup=get_moderator_kb())
         try:
-            bot.send_message(row['telegram_id'], "⛔ Ваш аккаунт заблокирован модератором.\nДля связи нажмите '📞 Связь с модератором'.")
+            bot.send_message(row['telegram_id'], "⛔ Вы заблокированы.")
         except:
             pass
     except Exception as e:
@@ -1292,7 +1321,6 @@ def mod_block_by_phone(message):
         phone = message.text
         db.execute("UPDATE users SET blocked = 1 WHERE phone = ?", (phone,))
         db.commit()
-        
         c = db.execute("SELECT id, name, telegram_id FROM users WHERE phone = ?", (phone,))
         if c:
             rows = c.fetchall()
@@ -1300,13 +1328,13 @@ def mod_block_by_phone(message):
                 bot.reply_to(message, f"✅ Заблокировано {len(rows)} пользователей.", reply_markup=get_moderator_kb())
                 for row in rows:
                     try:
-                        bot.send_message(row['telegram_id'], "⛔ Ваш аккаунт заблокирован модератором.\nДля связи нажмите '📞 Связь с модератором'.")
+                        bot.send_message(row['telegram_id'], "⛔ Вы заблокированы.")
                     except:
                         pass
             else:
-                bot.reply_to(message, "❌ Пользователь с таким номером не найден.", reply_markup=get_moderator_kb())
+                bot.reply_to(message, "❌ Пользователь не найден.", reply_markup=get_moderator_kb())
         else:
-            bot.reply_to(message, "❌ Пользователь с таким номером не найден.", reply_markup=get_moderator_kb())
+            bot.reply_to(message, "❌ Пользователь не найден.", reply_markup=get_moderator_kb())
     except Exception as e:
         logging.error(f"Ошибка в mod_block_by_phone: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -1318,24 +1346,19 @@ def mod_unblock_by_id(message):
         except:
             bot.reply_to(message, "❌ Введите число.", reply_markup=get_moderator_kb())
             return
-        
         c = db.execute("SELECT id, name, telegram_id FROM users WHERE id = ? AND blocked = 1", (user_id,))
         if c is None:
             bot.reply_to(message, "❌ Заблокированный пользователь не найден.", reply_markup=get_moderator_kb())
             return
         row = c.fetchone()
-        
         if not row:
             bot.reply_to(message, "❌ Заблокированный пользователь не найден.", reply_markup=get_moderator_kb())
             return
-        
         db.execute("UPDATE users SET blocked = 0 WHERE id = ?", (user_id,))
         db.commit()
-        
-        bot.reply_to(message, f"✅ Пользователь {row['name']} (ID {row['id']}) разблокирован.", reply_markup=get_moderator_kb())
-        
+        bot.reply_to(message, f"✅ {row['name']} разблокирован.", reply_markup=get_moderator_kb())
         try:
-            bot.send_message(row['telegram_id'], "✅ Ваш аккаунт разблокирован модератором!")
+            bot.send_message(row['telegram_id'], "✅ Вы разблокированы.")
         except:
             pass
     except Exception as e:
@@ -1348,46 +1371,39 @@ def arbitrate_command(message):
         if message.from_user.id not in MODERATOR_IDS:
             bot.reply_to(message, "❌ Нет прав.")
             return
-        
         parts = message.text.split()
         if len(parts) < 3:
-            bot.reply_to(message, "❌ Использование: /arbitrate ID refund|penalty|ban")
+            bot.reply_to(message, "❌ /arbitrate ID refund|penalty|ban")
             return
-        
         try:
             order_id = int(parts[1])
         except:
-            bot.reply_to(message, "❌ ID должен быть числом.")
+            bot.reply_to(message, "❌ ID должно быть числом.")
             return
-        
         action = parts[2].lower()
         order = get_order(order_id)
-        
         if not order:
             bot.reply_to(message, "❌ Заказ не найден.")
             return
-        
         if action == 'refund':
             db.execute("UPDATE orders SET status = 'cancelled' WHERE id = ?", (order_id,))
             db.commit()
-            bot.reply_to(message, f"✅ Заказ #{order_id} отменён, деньги возвращены заказчику.")
-            
+            bot.reply_to(message, f"✅ Заказ #{order_id} отменён, деньги возвращены.")
         elif action == 'penalty':
             add_rating(order[1], -1)
             bot.reply_to(message, f"✅ Заказчику #{order[1]} снижен рейтинг.")
-            
         elif action == 'ban':
             db.execute("UPDATE users SET blocked = 1 WHERE id = ?", (order[1],))
             db.commit()
             bot.reply_to(message, f"✅ Заказчик #{order[1]} заблокирован.")
-            
         else:
-            bot.reply_to(message, "❌ Неизвестное действие. Доступны: refund, penalty, ban.")
+            bot.reply_to(message, "❌ Доступно: refund, penalty, ban")
     except Exception as e:
         logging.error(f"Ошибка в arbitrate_command: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 # ========== CALLBACK ОБРАБОТЧИК ==========
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     try:
@@ -1403,6 +1419,7 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "⛔ Вы заблокированы", show_alert=True)
             return
         
+        # ========== ВЗЯТЬ ЗАКАЗ ==========
         if data.startswith('take_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1415,77 +1432,491 @@ def handle_callbacks(call):
                 bot.answer_callback_query(call.id, "❌ Только для работников", show_alert=True)
                 return
             
+            # Проверяем, есть ли уже активные заказы у работника
+            worker_orders = get_worker_orders(user[0])
+            for wo in worker_orders:
+                if wo[1] in ['open', 'in_progress', 'ready_to_pay', 'paid', 'working', 'waiting_approval']:
+                    bot.answer_callback_query(
+                        call.id, 
+                        f"❌ У вас уже есть активный заказ #{wo[0]}.\nЗавершите его или откажитесь.", 
+                        show_alert=True
+                    )
+                    return
+            
             assigned = get_assignments(order_id)
-            if user[0] in assigned:
+            if user[0] in [a[0] for a in assigned]:
                 bot.answer_callback_query(call.id, "❌ Вы уже взяли этот заказ", show_alert=True)
                 return
             
-            try:
-                bot.edit_message_text(
-                    f"⚠️ ПОДТВЕРДИТЕ ВЗЯТИЕ ЗАКАЗА #{order_id}\n\n"
-                    f"💵 Выплата: {order[8]} ₽\n"
-                    f"📍 Адрес: {order[3]}\n"
-                    f"⏱ Часы: {order[4]} ч.\n"
-                    f"👥 Нужно: {order[5]} чел.\n\n"
-                    f"Вы уверены?",
-                    call.message.chat.id,
-                    call.message.message_id,
-                    reply_markup=confirm_take_kb(order_id)
-                )
-                bot.answer_callback_query(call.id)
-            except Exception as e:
-                logging.error(f"Ошибка при показе подтверждения: {e}")
-                bot.answer_callback_query(call.id, "❌ Ошибка", show_alert=True)
-        
-        elif data.startswith('confirm_take_'):
-            order_id = int(data.split('_')[2])
-            order = get_order(order_id)
-            
-            if not order or order[9] != 'open':
-                bot.answer_callback_query(call.id, "❌ Заказ уже не доступен", show_alert=True)
-                return
-            
-            assigned = get_assignments(order_id)
-            if user[0] in assigned:
-                bot.answer_callback_query(call.id, "❌ Вы уже взяли", show_alert=True)
-                return
-            
+            # Добавляем в assignments
             db.execute("INSERT INTO assignments (order_id, user_id, payout) VALUES (?, ?, ?)", 
                       (order_id, user[0], order[8]))
             db.commit()
             
+            # Проверяем комплектность
             new_assigned = get_assignments(order_id)
-            if len(new_assigned) >= order[5]:
-                db.execute("UPDATE orders SET status = 'in_progress' WHERE id = ?", (order_id,))
-                db.commit()
+            confirmed_count = sum(1 for a in new_assigned if a[1] == 1)
+            total_workers = order[5]
+            
+            if len(new_assigned) >= total_workers:
+                update_order_status(order_id, 'ready_to_pay')
                 
+                # Уведомляем заказчика
                 try:
-                    bot.send_message(order[1], f"🔔 Заказ #{order_id} укомплектован! Все {order[5]} работников собраны.")
+                    text = (
+                        f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                        f"👥 Все {total_workers} работников собраны.\n"
+                        f"📍 Адрес: {order[3]}\n"
+                        f"💰 Сумма к оплате: {order[6]} ₽\n"
+                        f"💳 Переведите по СБП: {SBP_PHONE}\n\n"
+                        f"📌 ПОЧЕМУ ОПЛАТА СЕЙЧАС?\n\n"
+                        f"1️⃣ ЗАСТРАХОВАТЬ ВАШИ СРЕДСТВА\n"
+                        f"   Деньги хранятся на нашем счёте до полного выполнения заказа.\n"
+                        f"   Если работники сорвут сделку - мы вернём вам ВСЮ сумму.\n\n"
+                        f"2️⃣ ГАРАНТИРОВАТЬ ВЫПЛАТУ РАБОТНИКАМ\n"
+                        f"   Работники знают, что деньги уже зарезервированы.\n"
+                        f"   Это мотивирует их выполнить работу качественно и в срок.\n\n"
+                        f"3️⃣ ЗАЩИТИТЬ ОТ МОШЕННИКОВ\n"
+                        f"   Мы не передаём деньги работникам до вашего подтверждения.\n\n"
+                        f"✅ Ваши деньги в безопасности! Мы - гарант сделки."
+                    )
+                    bot.send_message(order[1], text, reply_markup=payment_kb(order_id))
                 except:
                     pass
                 
-                bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} укомплектован!", show_alert=True)
-            else:
-                bot.answer_callback_query(call.id, f"✅ Вы взяли заказ #{order_id}! Осталось {order[5] - len(new_assigned)} чел.", show_alert=True)
-            
-            try:
-                bot.edit_message_text(
-                    f"✅ ВЫ ВЗЯЛИ ЗАКАЗ #{order_id}\n\n"
-                    f"💵 Выплата: {order[8]} ₽\n"
-                    f"📍 Адрес: {order[3]}\n"
-                    f"📊 Статус: {'Укомплектован' if len(new_assigned) >= order[5] else 'Ожидает работников'}",
-                    call.message.chat.id,
-                    call.message.message_id
+                # Уведомляем работников
+                for worker_id in get_workers_for_order(order_id):
+                    try:
+                        worker = get_user_by_id(worker_id)
+                        if worker:
+                            bot.send_message(
+                                worker[1],
+                                f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                                f"👥 Все {total_workers} работников на месте.\n"
+                                f"📍 Адрес: {order[3]}\n"
+                                f"💰 Ваша выплата: {order[8]} ₽\n"
+                                f"📌 Ожидайте подтверждения оплаты от заказчика."
+                            )
+                    except:
+                        pass
+                
+                # Уведомляем модератора
+                for m in MODERATOR_IDS:
+                    try:
+                        bot.send_message(
+                            m,
+                            f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                            f"👤 Заказчик: {order[2]}\n"
+                            f"📍 Адрес: {order[3]}\n"
+                            f"👥 Работников: {total_workers}\n"
+                            f"💰 Сумма: {order[6]} ₽\n"
+                            f"📊 Комиссия: {order[7]} ₽"
+                        )
+                    except:
+                        pass
+                
+                bot.answer_callback_query(
+                    call.id, 
+                    f"✅ Заказ #{order_id} укомплектован!\nЗаказчик оплачивает.", 
+                    show_alert=True
                 )
-            except Exception as e:
-                logging.error(f"Ошибка обновления сообщения: {e}")
+            else:
+                bot.answer_callback_query(
+                    call.id, 
+                    f"✅ Вы взяли заказ #{order_id}!\nОсталось {total_workers - len(new_assigned)} чел.", 
+                    show_alert=True
+                )
             
+            # Показываем работнику кнопку "Я на месте"
+            bot.edit_message_text(
+                f"✅ Вы взяли заказ #{order_id}!\n\n"
+                f"📍 ВАЖНО! Подтвердите, что вы на месте.\n\n"
+                f"После вашего подтверждения:\n"
+                f"💰 Заказчик переведёт деньги на счёт сервиса\n"
+                f"📌 Это гарантирует вашу выплату\n\n"
+                f"Если вы НЕ нажмёте 'Я на месте':\n"
+                f"❌ Заказчик не сможет оплатить\n"
+                f"❌ Вы не получите выплату\n\n"
+                f"Вы уверены, что готовы выполнить заказ?",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=confirm_take_kb(order_id)
+            )
+        
+        # ========== ПОДТВЕРДИТЬ "НА МЕСТЕ" ==========
+        elif data.startswith('confirm_place_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order:
+                bot.answer_callback_query(call.id, "❌ Заказ не найден", show_alert=True)
+                return
+            
+            if order[9] not in ['open', 'in_progress', 'ready_to_pay']:
+                bot.answer_callback_query(call.id, "❌ Заказ уже не в этой стадии", show_alert=True)
+                return
+            
+            confirm_worker_on_place(order_id, user[0])
+            
+            bot.answer_callback_query(call.id, "✅ Вы подтвердили, что на месте!", show_alert=True)
+            bot.edit_message_text(
+                f"✅ Вы подтвердили, что на месте!\n\n"
+                f"📌 Что дальше?\n"
+                f"1. Дождитесь, пока все работники соберутся\n"
+                f"2. Заказчик оплатит заказ\n"
+                f"3. Вы получите уведомление о начале работы\n\n"
+                f"💰 Ваша выплата: {order[8]} ₽",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Проверяем, все ли подтвердили
+            assigned = get_assignments(order_id)
+            all_confirmed = all(a[1] == 1 for a in assigned)
+            
+            if all_confirmed and order[9] == 'open':
+                # Обновляем статус, если ещё не обновили
+                update_order_status(order_id, 'ready_to_pay')
+                
+                # Уведомляем заказчика
+                try:
+                    text = (
+                        f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                        f"👥 Все работники подтвердили, что они на месте.\n"
+                        f"📍 Адрес: {order[3]}\n"
+                        f"💰 Сумма к оплате: {order[6]} ₽\n"
+                        f"💳 Переведите по СБП: {SBP_PHONE}\n\n"
+                        f"📌 ПОЧЕМУ ОПЛАТА СЕЙЧАС?\n\n"
+                        f"1️⃣ ЗАСТРАХОВАТЬ ВАШИ СРЕДСТВА\n"
+                        f"   Деньги хранятся на нашем счёте до полного выполнения заказа.\n"
+                        f"   Если работники сорвут сделку - мы вернём вам ВСЮ сумму.\n\n"
+                        f"2️⃣ ГАРАНТИРОВАТЬ ВЫПЛАТУ РАБОТНИКАМ\n"
+                        f"   Работники знают, что деньги уже зарезервированы.\n"
+                        f"   Это мотивирует их выполнить работу качественно и в срок.\n\n"
+                        f"3️⃣ ЗАЩИТИТЬ ОТ МОШЕННИКОВ\n"
+                        f"   Мы не передаём деньги работникам до вашего подтверждения.\n\n"
+                        f"✅ Ваши деньги в безопасности! Мы - гарант сделки."
+                    )
+                    bot.send_message(order[1], text, reply_markup=payment_kb(order_id))
+                except:
+                    pass
+                
+                # Уведомляем работников
+                for worker_id in get_workers_for_order(order_id):
+                    try:
+                        worker = get_user_by_id(worker_id)
+                        if worker:
+                            bot.send_message(
+                                worker[1],
+                                f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                                f"👥 Все работники на месте.\n"
+                                f"📍 Адрес: {order[3]}\n"
+                                f"💰 Ваша выплата: {order[8]} ₽\n"
+                                f"📌 Ожидайте подтверждения оплаты от заказчика."
+                            )
+                    except:
+                        pass
+                
+                # Уведомляем модератора
+                for m in MODERATOR_IDS:
+                    try:
+                        bot.send_message(
+                            m,
+                            f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                            f"👤 Заказчик: {order[2]}\n"
+                            f"📍 Адрес: {order[3]}\n"
+                            f"👥 Работников: {order[5]}\n"
+                            f"💰 Сумма: {order[6]} ₽\n"
+                            f"📊 Комиссия: {order[7]} ₽"
+                        )
+                    except:
+                        pass
+        
+        # ========== ОТКАЗАТЬСЯ ОТ ЗАКАЗА ==========
+        elif data.startswith('cancel_take_'):
+            order_id = int(data.split('_')[2])
+            
+            db.execute("DELETE FROM assignments WHERE order_id = ? AND user_id = ?", (order_id, user[0]))
+            db.commit()
+            
+            bot.answer_callback_query(call.id, "❌ Вы отказались от заказа", show_alert=True)
+            bot.edit_message_text(
+                "❌ Вы отказались от заказа",
+                call.message.chat.id,
+                call.message.message_id
+            )
+        
+        # ========== ЗАКАЗЧИК ОПЛАТИЛ ==========
+        elif data.startswith('i_paid_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order or order[9] != 'ready_to_pay':
+                bot.answer_callback_query(call.id, "❌ Заказ не в статусе оплаты", show_alert=True)
+                return
+            
+            if user[0] != order[1]:
+                bot.answer_callback_query(call.id, "❌ Это не ваш заказ", show_alert=True)
+                return
+            
+            update_order_status(order_id, 'paid')
+            db.execute("UPDATE orders SET paid_at = ? WHERE id = ?", (datetime.now().isoformat(), order_id))
+            db.commit()
+            
+            bot.answer_callback_query(call.id, "✅ Оплата подтверждена! Ожидайте подтверждения.", show_alert=True)
+            bot.edit_message_text(
+                f"✅ Вы подтвердили оплату заказа #{order_id}!\n\n"
+                f"📌 Ожидайте подтверждения от сервиса.\n"
+                f"После этого работники приступят к работе.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Уведомляем модератора
             for m in MODERATOR_IDS:
                 try:
-                    bot.send_message(m, f"👷 {user[2]} взял заказ #{order_id}")
+                    bot.send_message(
+                        m,
+                        f"💰 ЗАКАЗ #{order_id} ОПЛАЧЕН!\n\n"
+                        f"👤 Заказчик: {order[2]}\n"
+                        f"📍 Адрес: {order[3]}\n"
+                        f"💰 Сумма: {order[6]} ₽\n\n"
+                        f"📌 Подтвердите оплату:",
+                        reply_markup=moderator_payment_kb(order_id)
+                    )
                 except:
                     pass
         
+        # ========== МОДЕРАТОР ПОДТВЕРЖДАЕТ ОПЛАТУ ==========
+        elif data.startswith('confirm_payment_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order or order[9] != 'paid':
+                bot.answer_callback_query(call.id, "❌ Заказ не в статусе оплаты", show_alert=True)
+                return
+            
+            if user[0] not in MODERATOR_IDS:
+                bot.answer_callback_query(call.id, "❌ Нет прав", show_alert=True)
+                return
+            
+            update_order_status(order_id, 'working')
+            db.commit()
+            
+            bot.answer_callback_query(call.id, f"✅ Оплата заказа #{order_id} подтверждена!", show_alert=True)
+            bot.edit_message_text(
+                f"✅ Оплата заказа #{order_id} подтверждена!\n\n"
+                f"📌 Работники приступают к работе.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Уведомляем работников
+            for worker_id in get_workers_for_order(order_id):
+                try:
+                    worker = get_user_by_id(worker_id)
+                    if worker:
+                        bot.send_message(
+                            worker[1],
+                            f"✅ ЗАКАЗ #{order_id} ОПЛАЧЕН!\n\n"
+                            f"💰 Ваша выплата: {order[8]} ₽\n"
+                            f"📌 Деньги зарезервированы на счёте сервиса.\n\n"
+                            f"🔧 МОЖНО ПРИСТУПАТЬ К РАБОТЕ!\n"
+                            f"📍 Адрес: {order[3]}\n"
+                            f"⏱ Часы: {order[4]} ч.\n\n"
+                            f"📸 После выполнения отправьте фото:",
+                            reply_markup=worker_photo_kb(order_id)
+                        )
+                except:
+                    pass
+            
+            # Уведомляем заказчика
+            try:
+                bot.send_message(
+                    order[1],
+                    f"✅ ЗАКАЗ #{order_id} ПОДТВЕРЖДЁН!\n\n"
+                    f"📍 Адрес: {order[3]}\n"
+                    f"⏱ Часы: {order[4]} ч.\n"
+                    f"👥 Работников: {order[5]}\n\n"
+                    f"📌 Работники приступили к работе.\n"
+                    f"Вы получите уведомление, когда она будет выполнена."
+                )
+            except:
+                pass
+        
+        # ========== ОТПРАВИТЬ ФОТО (работник) ==========
+        elif data.startswith('send_photo_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order or order[9] != 'working':
+                bot.answer_callback_query(call.id, "❌ Заказ не в статусе работы", show_alert=True)
+                return
+            
+            # Проверяем, что работник взял этот заказ
+            assigned = get_assignments(order_id)
+            if user[0] not in [a[0] for a in assigned]:
+                bot.answer_callback_query(call.id, "❌ Вы не взяли этот заказ", show_alert=True)
+                return
+            
+            bot.answer_callback_query(call.id, "📸 Отправьте фото выполненной работы", show_alert=True)
+            bot.send_message(
+                call.message.chat.id,
+                f"📸 Отправьте фото выполненной работы для заказа #{order_id}\n\n"
+                f"📍 Адрес: {order[3]}\n"
+                f"⏱ Часы: {order[4]} ч.\n\n"
+                f"📌 Фото обязательно для подтверждения заказчиком."
+            )
+            # Сохраняем состояние, что ждём фото
+            order_data[f'waiting_photo_{user[0]}_{order_id}'] = True
+        
+        # ========== ПРИЁМ ФОТО ОТ РАБОТНИКА ==========
+        elif data == 'i_paid' or data == 'confirm_payment' or data == 'send_photo':
+            # Это заглушка, чтобы не падало
+            pass
+        
+        # ========== ЗАКАЗЧИК ОДОБРЯЕТ РАБОТУ ==========
+        elif data.startswith('approve_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order or order[9] != 'waiting_approval':
+                bot.answer_callback_query(call.id, "❌ Заказ не ждёт подтверждения", show_alert=True)
+                return
+            
+            if user[0] != order[1]:
+                bot.answer_callback_query(call.id, "❌ Это не ваш заказ", show_alert=True)
+                return
+            
+            update_order_status(order_id, 'waiting_payout')
+            db.execute("UPDATE orders SET completed_at = ? WHERE id = ?", (datetime.now().isoformat(), order_id))
+            db.commit()
+            
+            bot.answer_callback_query(call.id, "✅ Работа подтверждена!", show_alert=True)
+            bot.edit_message_text(
+                f"✅ Заказ #{order_id} выполнен!\n\n"
+                f"💰 Вы перевели: {order[6]} ₽\n"
+                f"📌 Работники получат оплату после подтверждения сервиса.\n\n"
+                f"Спасибо за доверие!",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Уведомляем модератора
+            for m in MODERATOR_IDS:
+                try:
+                    bot.send_message(
+                        m,
+                        f"✅ ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n\n"
+                        f"👤 Заказчик подтвердил выполнение.\n"
+                        f"📍 Адрес: {order[3]}\n"
+                        f"💰 Сумма: {order[6]} ₽\n"
+                        f"📊 Комиссия: {order[7]} ₽\n"
+                        f"💵 Выплата работникам: {order[8]} ₽/чел\n\n"
+                        f"📌 Переведите деньги работникам и подтвердите:",
+                        reply_markup=moderator_payout_kb(order_id)
+                    )
+                except:
+                    pass
+            
+            # Уведомляем работников
+            for worker_id in get_workers_for_order(order_id):
+                try:
+                    worker = get_user_by_id(worker_id)
+                    if worker:
+                        bot.send_message(
+                            worker[1],
+                            f"✅ Заказ #{order_id} одобрен заказчиком!\n\n"
+                            f"💵 Ваша выплата: {order[8]} ₽\n"
+                            f"📌 Ожидайте перевода от сервиса."
+                        )
+                except:
+                    pass
+        
+        # ========== ЗАКАЗЧИК ОТКЛОНЯЕТ РАБОТУ ==========
+        elif data.startswith('reject_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order or order[9] != 'waiting_approval':
+                bot.answer_callback_query(call.id, "❌ Заказ не ждёт подтверждения", show_alert=True)
+                return
+            
+            if user[0] != order[1]:
+                bot.answer_callback_query(call.id, "❌ Это не ваш заказ", show_alert=True)
+                return
+            
+            bot.answer_callback_query(call.id, "❌ Работа отклонена", show_alert=True)
+            bot.edit_message_text(
+                f"❌ Работа по заказу #{order_id} отклонена.\n\n"
+                f"📌 Свяжитесь с модератором для решения ситуации.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Уведомляем модератора
+            for m in MODERATOR_IDS:
+                try:
+                    bot.send_message(
+                        m,
+                        f"❌ ЗАКАЗ #{order_id} ОТКЛОНЁН ЗАКАЗЧИКОМ!\n\n"
+                        f"👤 Заказчик: {order[2]}\n"
+                        f"📍 Адрес: {order[3]}\n"
+                        f"📌 Требуется арбитраж."
+                    )
+                except:
+                    pass
+        
+        # ========== МОДЕРАТОР ВЫПЛАТИЛ РАБОТНИКАМ ==========
+        elif data.startswith('confirm_payout_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            
+            if not order or order[9] != 'waiting_payout':
+                bot.answer_callback_query(call.id, "❌ Заказ не в статусе выплаты", show_alert=True)
+                return
+            
+            if user[0] not in MODERATOR_IDS:
+                bot.answer_callback_query(call.id, "❌ Нет прав", show_alert=True)
+                return
+            
+            update_order_status(order_id, 'completed')
+            db.commit()
+            
+            bot.answer_callback_query(call.id, f"✅ Выплата по заказу #{order_id} подтверждена!", show_alert=True)
+            bot.edit_message_text(
+                f"✅ Выплата по заказу #{order_id} подтверждена!\n\n"
+                f"📌 Заказ завершён.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Уведомляем заказчика
+            try:
+                bot.send_message(
+                    order[1],
+                    f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n\n"
+                    f"💰 Работники получили оплату.\n"
+                    f"Спасибо за доверие!"
+                )
+            except:
+                pass
+            
+            # Уведомляем работников
+            for worker_id in get_workers_for_order(order_id):
+                try:
+                    worker = get_user_by_id(worker_id)
+                    if worker:
+                        bot.send_message(
+                            worker[1],
+                            f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n\n"
+                            f"💵 Вы получили выплату: {order[8]} ₽\n"
+                            f"Спасибо за работу!"
+                        )
+                except:
+                    pass
+        
+        # ========== ОТМЕНА ЗАКАЗА (заказчик) ==========
         elif data.startswith('cancel_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1498,30 +1929,40 @@ def handle_callbacks(call):
                 bot.answer_callback_query(call.id, "❌ Только для заказчиков", show_alert=True)
                 return
             
-            if order[9] != 'open':
-                bot.answer_callback_query(call.id, "❌ Можно отменить только открытый заказ", show_alert=True)
+            if order[9] not in ['open', 'in_progress', 'ready_to_pay']:
+                bot.answer_callback_query(call.id, "❌ Нельзя отменить", show_alert=True)
                 return
             
-            if cancel_order(order_id):
-                bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} отменён!", show_alert=True)
+            update_order_status(order_id, 'cancelled')
+            db.commit()
+            
+            bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} отменён!", show_alert=True)
+            bot.edit_message_text(
+                f"❌ ЗАКАЗ #{order_id} ОТМЕНЁН",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Уведомляем работников
+            for worker_id in get_workers_for_order(order_id):
                 try:
-                    bot.edit_message_text(
-                        f"❌ ЗАКАЗ #{order_id} ОТМЕНЁН\n\n"
-                        f"Заказчик: {order[2]}",
-                        call.message.chat.id,
-                        call.message.message_id
-                    )
-                except Exception as e:
-                    logging.error(f"Ошибка обновления сообщения: {e}")
-                
-                for m in MODERATOR_IDS:
-                    try:
-                        bot.send_message(m, f"❌ Заказ #{order_id} отменён заказчиком {user[2]}")
-                    except:
-                        pass
-            else:
-                bot.answer_callback_query(call.id, "❌ Ошибка при отмене", show_alert=True)
+                    worker = get_user_by_id(worker_id)
+                    if worker:
+                        bot.send_message(
+                            worker[1],
+                            f"❌ Заказ #{order_id} отменён заказчиком."
+                        )
+                except:
+                    pass
+            
+            # Уведомляем модератора
+            for m in MODERATOR_IDS:
+                try:
+                    bot.send_message(m, f"❌ Заказ #{order_id} отменён заказчиком")
+                except:
+                    pass
         
+        # ========== ЗАВЕРШЕНИЕ ЗАКАЗА (заказчик) ==========
         elif data.startswith('complete_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1534,49 +1975,33 @@ def handle_callbacks(call):
                 bot.answer_callback_query(call.id, "❌ Только для заказчиков", show_alert=True)
                 return
             
-            if order[9] == 'completed':
-                bot.answer_callback_query(call.id, "❌ Уже завершён", show_alert=True)
+            if order[9] != 'working':
+                bot.answer_callback_query(call.id, "❌ Заказ не в работе", show_alert=True)
                 return
             
-            db.execute("UPDATE orders SET status = 'completed' WHERE id = ?", (order_id,))
+            # Проверяем, есть ли фото от работников
+            workers_with_photo = get_assignments_with_photo(order_id)
+            if not workers_with_photo:
+                bot.answer_callback_query(
+                    call.id, 
+                    "❌ Работники ещё не отправили фото выполненной работы.\nДождитесь фото.", 
+                    show_alert=True
+                )
+                return
+            
+            update_order_status(order_id, 'waiting_approval')
             db.commit()
             
-            bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} завершён!", show_alert=True)
-            try:
-                bot.edit_message_text(
-                    f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН\n\n"
-                    f"💰 Сумма: {order[6]} ₽",
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-            except Exception as e:
-                logging.error(f"Ошибка обновления сообщения: {e}")
-            
-            assigned = get_assignments(order_id)
-            for worker_id in assigned:
-                try:
-                    worker = get_user_by_id(worker_id)
-                    if worker:
-                        bot.send_message(worker[1], f"✅ Заказ #{order_id} завершён! Ваша выплата: {order[8]} ₽")
-                except:
-                    pass
-            
-            for m in MODERATOR_IDS:
-                try:
-                    bot.send_message(m, f"✅ Заказ #{order_id} завершён заказчиком {user[2]}")
-                except:
-                    pass
-        
-        elif data == 'cancel_take':
-            try:
-                bot.edit_message_text(
-                    "❌ Взятие отменено",
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-                bot.answer_callback_query(call.id)
-            except Exception as e:
-                logging.error(f"Ошибка отмены взятия: {e}")
+            bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} ожидает подтверждения!", show_alert=True)
+            bot.edit_message_text(
+                f"📸 Заказ #{order_id} выполнен!\n\n"
+                f"📍 Адрес: {order[3]}\n"
+                f"⏱ Часы: {order[4]} ч.\n\n"
+                f"✅ Подтвердите, что работа выполнена качественно:",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=approve_kb(order_id)
+            )
         
         else:
             bot.answer_callback_query(call.id, "❌ Неизвестная команда", show_alert=True)
@@ -1588,7 +2013,83 @@ def handle_callbacks(call):
         except:
             pass
 
+# ========== ОБРАБОТЧИК ФОТО ==========
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    try:
+        uid = message.from_user.id
+        user = get_user(uid)
+        
+        if not user:
+            bot.reply_to(message, "❌ Нажмите /start")
+            return
+        
+        # Проверяем, ждём ли мы фото от этого пользователя
+        waiting_key = f'waiting_photo_{uid}_'
+        order_id = None
+        
+        for key in order_data.keys():
+            if key.startswith(waiting_key):
+                order_id = int(key.split('_')[3])
+                break
+        
+        if not order_id:
+            bot.reply_to(message, "❌ Нет активного запроса на фото.\nИспользуйте кнопку '📸 Отправить фото'.")
+            return
+        
+        # Удаляем состояние ожидания
+        del order_data[f'waiting_photo_{uid}_{order_id}']
+        
+        # Сохраняем фото
+        photo_file_id = message.photo[-1].file_id
+        set_worker_photo(order_id, user[0], photo_file_id)
+        
+        bot.reply_to(message, f"✅ Фото для заказа #{order_id} сохранено!\n\nОжидайте подтверждения от заказчика.")
+        
+        # Проверяем, все ли работники отправили фото
+        order = get_order(order_id)
+        if order:
+            workers_in_order = get_workers_for_order(order_id)
+            workers_with_photo = get_assignments_with_photo(order_id)
+            
+            if len(workers_with_photo) == len(workers_in_order):
+                # Все отправили фото - уведомляем заказчика
+                try:
+                    bot.send_message(
+                        order[1],
+                        f"📸 Все работники отправили фото по заказу #{order_id}!\n\n"
+                        f"📍 Адрес: {order[3]}\n"
+                        f"⏱ Часы: {order[4]} ч.\n\n"
+                        f"✅ Подтвердите, что работа выполнена качественно:",
+                        reply_markup=approve_kb(order_id)
+                    )
+                except:
+                    pass
+                
+                # Обновляем статус
+                if order[9] == 'working':
+                    update_order_status(order_id, 'waiting_approval')
+                    
+                    # Уведомляем модератора
+                    for m in MODERATOR_IDS:
+                        try:
+                            bot.send_message(
+                                m,
+                                f"📸 Все работники отправили фото по заказу #{order_id}!\n\n"
+                                f"👤 Заказчик: {order[2]}\n"
+                                f"📍 Адрес: {order[3]}\n"
+                                f"📌 Ожидаем подтверждения от заказчика."
+                            )
+                        except:
+                            pass
+        
+    except Exception as e:
+        logging.error(f"Ошибка в handle_photo: {e}")
+        bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
+
 # ========== ЗАБЛОКИРОВАННЫЙ ==========
+
 @bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
 def contact_moderator(message):
     try:
@@ -1610,6 +2111,7 @@ def contact_moderator(message):
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 # ========== FALLBACK ==========
+
 @bot.message_handler(func=lambda m: True)
 def fallback(message):
     try:
@@ -1633,10 +2135,12 @@ def fallback(message):
         bot.reply_to(message, "Используйте кнопки меню.", reply_markup=get_main_kb(None))
 
 # ========== ЗАПУСК ==========
+
 if __name__ == "__main__":
     logging.info("🚀 Бот запущен!")
     print("🤖 Бот Юрга-Подработка запущен!")
     print(f"📊 Модераторы: {MODERATOR_IDS}")
+    print(f"💳 СБП: {SBP_PHONE}")
     print("✅ Готов к работе!")
     
     while True:
