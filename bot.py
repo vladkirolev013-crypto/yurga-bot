@@ -18,9 +18,6 @@ MODERATOR_IDS = [
 # НОМЕР СБП (пока заглушка, потом подставишь свой)
 SBP_PHONE = '+7XXXXXXXXXX'
 
-# Время ожидания подтверждения "на месте" (минуты)
-CONFIRM_TIMEOUT = 30
-
 bot = telebot.TeleBot(TOKEN)
 
 # ========== ЛОГИРОВАНИЕ ==========
@@ -120,6 +117,12 @@ class Database:
             self.conn.commit()
         except Exception as e:
             logging.error(f"Ошибка commit: {e}")
+    
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception as e:
+            logging.error(f"Ошибка close: {e}")
 
 db = Database()
 
@@ -493,14 +496,6 @@ def moderator_payout_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
     kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_{order_id}"))
-    return kb
-
-def contact_kb(user_id, order_id=None):
-    kb = InlineKeyboardMarkup()
-    if order_id:
-        kb.add(InlineKeyboardButton("📝 Написать", callback_data=f"send_msg_{user_id}_{order_id}"))
-    else:
-        kb.add(InlineKeyboardButton("📝 Написать", callback_data=f"send_msg_{user_id}_0"))
     return kb
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
@@ -1672,7 +1667,7 @@ def handle_callbacks(call):
             order_id = int(data.split('_')[3])
             order = get_order(order_id)
             if order:
-                target_id = order[1]  # zakazchik_id
+                target_id = order[1]
                 msg_data[user_id] = {'target': target_id, 'order_id': order_id}
                 target_user = get_user_by_id(target_id)
                 target_name = target_user[2] if target_user else "заказчиком"
@@ -1688,7 +1683,6 @@ def handle_callbacks(call):
             order_id = int(data.split('_')[3])
             workers = get_workers_for_order(order_id)
             if workers:
-                # Если несколько работников - показываем список
                 if len(workers) > 1:
                     kb = InlineKeyboardMarkup()
                     for w_id in workers:
@@ -1711,7 +1705,7 @@ def handle_callbacks(call):
             else:
                 bot.answer_callback_query(call.id, "❌ Нет работников у этого заказа", show_alert=True)
         
-        # ========== ОБЫЧНАЯ ОТПРАВКА (кнопка из контакта) ==========
+        # ========== ОБЫЧНАЯ ОТПРАВКА ==========
         elif data.startswith('contact_customer_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1756,7 +1750,10 @@ def handle_callbacks(call):
             # Проверяем, есть ли уже активные заказы у работника
             worker_orders = get_worker_orders(user[0])
             for wo in worker_orders:
-                if wo[1] in ['open', 'in_progress', 'ready_to_pay', 'paid', 'working', 'waiting_approval']:
+                # Исключаем финальные статусы - можно брать новый заказ
+                if wo[1] in ['waiting_approval', 'waiting_payout']:
+                    continue
+                if wo[1] in ['open', 'in_progress', 'ready_to_pay', 'paid', 'working']:
                     bot.answer_callback_query(
                         call.id, 
                         f"❌ У вас уже есть активный заказ #{wo[0]}.\nЗавершите его или откажитесь.", 
@@ -2074,7 +2071,6 @@ def handle_callbacks(call):
                 bot.answer_callback_query(call.id, "❌ Заказ не в статусе работы", show_alert=True)
                 return
             
-            # Проверяем, что работник взял этот заказ
             assigned = get_assignments(order_id)
             if user[0] not in [a[0] for a in assigned]:
                 bot.answer_callback_query(call.id, "❌ Вы не взяли этот заказ", show_alert=True)
@@ -2088,7 +2084,6 @@ def handle_callbacks(call):
                 f"⏱ Часы: {order[4]} ч.\n\n"
                 f"📌 Фото обязательно для подтверждения заказчиком."
             )
-            # Сохраняем состояние, что ждём фото
             order_data[f'waiting_photo_{user[0]}_{order_id}'] = True
         
         # ========== ЗАКАЗЧИК ОДОБРЯЕТ РАБОТУ ==========
@@ -2295,7 +2290,6 @@ def handle_callbacks(call):
                 bot.answer_callback_query(call.id, "❌ Заказ не в работе", show_alert=True)
                 return
             
-            # Проверяем, есть ли фото от работников
             workers_with_photo = get_assignments_with_photo(order_id)
             if not workers_with_photo:
                 bot.answer_callback_query(
@@ -2345,7 +2339,7 @@ def handle_photo(message):
         waiting_key = f'waiting_photo_{uid}_'
         order_id = None
         
-        for key in order_data.keys():
+        for key in list(order_data.keys()):
             if key.startswith(waiting_key):
                 order_id = int(key.split('_')[3])
                 break
@@ -2354,8 +2348,8 @@ def handle_photo(message):
             bot.reply_to(message, "❌ Нет активного запроса на фото.\nИспользуйте кнопку '📸 Отправить фото'.")
             return
         
-        # Удаляем состояние ожидания
-        del order_data[f'waiting_photo_{uid}_{order_id}']
+        # Удаляем состояние ожидания (безопасно, даже если ключа нет)
+        order_data.pop(f'waiting_photo_{uid}_{order_id}', None)
         
         # Сохраняем фото
         photo_file_id = message.photo[-1].file_id
