@@ -90,6 +90,17 @@ class Database:
                 photo_file_id TEXT
             )''')
             
+            # Таблица для сообщений (чат между пользователями)
+            c.execute('''CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_user_id INTEGER,
+                to_user_id INTEGER,
+                order_id INTEGER,
+                text TEXT,
+                created_at TEXT,
+                read INTEGER DEFAULT 0
+            )''')
+            
             self.conn.commit()
             logging.info("✅ База данных инициализирована")
         except Exception as e:
@@ -347,6 +358,37 @@ def rate_customer(customer_id, delta):
         logging.error(f"Ошибка rate_customer: {e}")
         return False
 
+# ========== ФУНКЦИИ ДЛЯ СООБЩЕНИЙ ==========
+def save_message(from_user_id, to_user_id, order_id, text):
+    try:
+        db.execute("INSERT INTO messages (from_user_id, to_user_id, order_id, text, created_at) VALUES (?, ?, ?, ?, ?)",
+                  (from_user_id, to_user_id, order_id, text, datetime.now().isoformat()))
+        db.commit()
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка save_message: {e}")
+        return False
+
+def get_unread_messages(user_id):
+    try:
+        c = db.execute("SELECT id, from_user_id, order_id, text, created_at FROM messages WHERE to_user_id = ? AND read = 0 ORDER BY created_at DESC", (user_id,))
+        if c is None:
+            return []
+        rows = c.fetchall()
+        return [[row['id'], row['from_user_id'], row['order_id'], row['text'], row['created_at']] for row in rows]
+    except Exception as e:
+        logging.error(f"Ошибка get_unread_messages: {e}")
+        return []
+
+def mark_messages_read(user_id):
+    try:
+        db.execute("UPDATE messages SET read = 1 WHERE to_user_id = ?", (user_id,))
+        db.commit()
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка mark_messages_read: {e}")
+        return False
+
 # ========== КЛАВИАТУРЫ ==========
 _main_kb = None
 _worker_kb = None
@@ -368,7 +410,7 @@ def get_worker_kb():
         kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📋 Свободные заказы"))
         kb.row(KeyboardButton("💰 Мои выплаты"), KeyboardButton("📋 Мои заказы"))
         kb.row(KeyboardButton("👤 Профиль"), KeyboardButton("🔄 Сменить смену"))
-        kb.row(KeyboardButton("⬅️ Назад"))
+        kb.row(KeyboardButton("📞 Связаться с модератором"), KeyboardButton("⬅️ Назад"))
         _worker_kb = kb
     return _worker_kb
 
@@ -391,7 +433,8 @@ def get_moderator_kb():
         kb.row(KeyboardButton("🏢 Заказчики"), KeyboardButton("📊 Статистика"))
         kb.row(KeyboardButton("⭐ Оценить работника"), KeyboardButton("⭐ Оценить заказчика"))
         kb.row(KeyboardButton("⚖️ Арбитраж"), KeyboardButton("🔒 Блокировка"))
-        kb.row(KeyboardButton("🔓 Разблокировка"), KeyboardButton("⬅️ Назад"))
+        kb.row(KeyboardButton("🔓 Разблокировка"), KeyboardButton("📨 Сообщения"))
+        kb.row(KeyboardButton("⬅️ Назад"))
         _moderator_kb = kb
     return _moderator_kb
 
@@ -407,6 +450,7 @@ def order_inline_kb(order_id, is_customer=False):
     kb = InlineKeyboardMarkup()
     if is_customer:
         kb.add(InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_id}"))
+        kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_{order_id}"))
         kb.add(InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_id}"))
     else:
         kb.add(InlineKeyboardButton("📋 Взять заказ", callback_data=f"take_{order_id}"))
@@ -416,38 +460,53 @@ def confirm_take_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("📍 Я на месте", callback_data=f"confirm_place_{order_id}"))
     kb.add(InlineKeyboardButton("❌ Отказаться", callback_data=f"cancel_take_{order_id}"))
+    kb.add(InlineKeyboardButton("📞 Связаться", callback_data=f"contact_mod_{order_id}"))
     return kb
 
 def payment_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ Я оплатил", callback_data=f"i_paid_{order_id}"))
     kb.add(InlineKeyboardButton("❌ Отменить заказ", callback_data=f"cancel_{order_id}"))
+    kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_{order_id}"))
     return kb
 
 def worker_photo_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("📸 Отправить фото", callback_data=f"send_photo_{order_id}"))
+    kb.add(InlineKeyboardButton("📞 Связаться", callback_data=f"contact_mod_{order_id}"))
     return kb
 
 def approve_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ Работа выполнена", callback_data=f"approve_{order_id}"))
     kb.add(InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{order_id}"))
+    kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_{order_id}"))
     return kb
 
 def moderator_payment_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"confirm_payment_{order_id}"))
+    kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_{order_id}"))
     return kb
 
 def moderator_payout_kb(order_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
+    kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_{order_id}"))
+    return kb
+
+def contact_kb(user_id, order_id=None):
+    kb = InlineKeyboardMarkup()
+    if order_id:
+        kb.add(InlineKeyboardButton("📝 Написать", callback_data=f"send_msg_{user_id}_{order_id}"))
+    else:
+        kb.add(InlineKeyboardButton("📝 Написать", callback_data=f"send_msg_{user_id}_0"))
     return kb
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
 reg_data = {}
 order_data = {}
+msg_data = {}
 
 # ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
 
@@ -466,6 +525,12 @@ def start(message):
         if user[11] == 1:
             bot.reply_to(message, "⛔ Ваш аккаунт заблокирован.", reply_markup=get_blocked_kb())
             return
+        
+        # Проверяем непрочитанные сообщения
+        unread = get_unread_messages(uid)
+        if unread and uid not in MODERATOR_IDS:
+            count = len(unread)
+            bot.send_message(message.chat.id, f"📨 У вас {count} непрочитанных сообщений. Нажмите '📨 Сообщения' в меню (если есть) или напишите модератору.")
         
         role = user[6]
         if role == 'rabotnik':
@@ -519,7 +584,11 @@ def role_choice(message):
 def back_to_main(message):
     try:
         uid = message.from_user.id
-        bot.reply_to(message, "📱 Главное меню:\n\nВыберите роль:", reply_markup=get_main_kb(uid))
+        user = get_user(uid)
+        if user and user[6] == 'moderator' and uid in MODERATOR_IDS:
+            bot.reply_to(message, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
+        else:
+            bot.reply_to(message, "📱 Главное меню:\n\nВыберите роль:", reply_markup=get_main_kb(uid))
     except Exception as e:
         logging.error(f"Ошибка в back_to_main: {e}")
         bot.reply_to(message, "📱 Главное меню:", reply_markup=get_main_kb(None))
@@ -778,7 +847,9 @@ def my_worker_orders(message):
                 f"👤 Заказчик: {o[3]}\n"
                 f"📍 Адрес: {o[4]}"
             )
-            bot.send_message(message.chat.id, text)
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{o[0]}"))
+            bot.send_message(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logging.error(f"Ошибка в my_worker_orders: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -841,6 +912,42 @@ def profile(message):
         bot.reply_to(message, text)
     except Exception as e:
         logging.error(f"Ошибка в profile: {e}")
+        bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
+
+@bot.message_handler(func=lambda m: m.text == '📞 Связаться с модератором')
+def contact_moderator_worker(message):
+    try:
+        uid = message.from_user.id
+        user = get_user(uid)
+        
+        if not user or user[6] != 'rabotnik':
+            bot.reply_to(message, "❌ Эта функция только для работников.")
+            return
+        
+        if user[11] == 1:
+            bot.reply_to(message, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
+            return
+        
+        msg = bot.reply_to(message, "📝 Напишите сообщение модератору:")
+        bot.register_next_step_handler(msg, send_to_moderator, uid)
+    except Exception as e:
+        logging.error(f"Ошибка в contact_moderator_worker: {e}")
+        bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
+
+def send_to_moderator(message, uid):
+    try:
+        user = get_user(uid)
+        text = f"📩 СООБЩЕНИЕ ОТ РАБОТНИКА\n\nОт: {user[2] or 'без имени'} (ID {user[0]})\nТелефон: {user[3] or 'не указан'}\n\n{message.text}"
+        
+        for m in MODERATOR_IDS:
+            try:
+                bot.send_message(m, text)
+            except:
+                pass
+        
+        bot.reply_to(message, "✅ Сообщение отправлено модератору.", reply_markup=get_worker_kb())
+    except Exception as e:
+        logging.error(f"Ошибка в send_to_moderator: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 # ========== ЗАКАЗЧИК ==========
@@ -1003,7 +1110,11 @@ def my_orders_customer(message):
                 f"💰 Сумма: {o[1]} ₽\n"
                 f"📊 Статус: {status_text}"
             )
-            bot.send_message(message.chat.id, text)
+            kb = InlineKeyboardMarkup()
+            workers = get_workers_for_order(o[0])
+            if workers:
+                kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{o[0]}"))
+            bot.send_message(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logging.error(f"Ошибка в my_orders_customer: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
@@ -1027,7 +1138,7 @@ def complain(message):
 def send_complaint(message, uid):
     try:
         user = get_user(uid)
-        text = f"⚠️ ЖАЛОБА\n\nОт: {user[2] or 'без имени'} (ID {uid})\nТелефон: {user[3] or 'не указан'}\n\n{message.text}"
+        text = f"⚠️ ЖАЛОБА\n\nОт: {user[2] or 'без имени'} (ID {user[0]})\nТелефон: {user[3] or 'не указан'}\n\n{message.text}"
         
         for m in MODERATOR_IDS:
             try:
@@ -1045,7 +1156,7 @@ def send_complaint(message, uid):
 @bot.message_handler(func=lambda m: m.text in [
     '💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', 
     '🏢 Заказчики', '📊 Статистика', '⭐ Оценить работника', '⭐ Оценить заказчика',
-    '⚖️ Арбитраж', '🔒 Блокировка', '🔓 Разблокировка'
+    '⚖️ Арбитраж', '🔒 Блокировка', '🔓 Разблокировка', '📨 Сообщения'
 ] and m.from_user.id in MODERATOR_IDS)
 def moderator_commands(message):
     try:
@@ -1084,7 +1195,12 @@ def moderator_commands(message):
                     f"💰 Сумма: {row['total_sum']} ₽\n"
                     f"💵 Выплата: {row['payout_per_person']} ₽/чел"
                 )
-                bot.send_message(message.chat.id, msg_text)
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{row['id']}"))
+                workers = get_workers_for_order(row['id'])
+                if workers:
+                    kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{row['id']}"))
+                bot.send_message(message.chat.id, msg_text, reply_markup=kb)
         
         elif text == '✅ Завершённые':
             c = db.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY created_at DESC")
@@ -1102,7 +1218,12 @@ def moderator_commands(message):
                     f"📍 Адрес: {row['address']}\n"
                     f"💰 Сумма: {row['total_sum']} ₽"
                 )
-                bot.send_message(message.chat.id, msg_text)
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{row['id']}"))
+                workers = get_workers_for_order(row['id'])
+                if workers:
+                    kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{row['id']}"))
+                bot.send_message(message.chat.id, msg_text, reply_markup=kb)
         
         elif text == '👥 Работники':
             workers = get_all_workers()
@@ -1190,6 +1311,26 @@ def moderator_commands(message):
         elif text == '🔓 Разблокировка':
             msg = bot.reply_to(message, "Введите ID пользователя:")
             bot.register_next_step_handler(msg, mod_unblock_by_id)
+        
+        elif text == '📨 Сообщения':
+            unread = get_unread_messages(uid)
+            if not unread:
+                bot.reply_to(message, "📨 Нет новых сообщений.")
+                return
+            
+            mark_messages_read(uid)
+            msg_text = "📨 НОВЫЕ СООБЩЕНИЯ:\n\n"
+            for msg in unread[:10]:
+                from_user = get_user_by_id(msg[1])
+                from_name = from_user[2] if from_user else "Неизвестный"
+                order_text = f" (заказ #{msg[2]})" if msg[2] != 0 else ""
+                msg_text += f"От: {from_name}{order_text}\n{msg[3]}\n{msg[4][:16]}\n\n"
+            
+            if len(unread) > 10:
+                msg_text += f"\n... и ещё {len(unread)-10} сообщений"
+            
+            msg_text += "\n📌 Чтобы ответить - используйте кнопки 'Написать' в заказах"
+            bot.reply_to(message, msg_text)
             
     except Exception as e:
         logging.error(f"Ошибка в moderator_commands: {e}")
@@ -1402,6 +1543,102 @@ def arbitrate_command(message):
         logging.error(f"Ошибка в arbitrate_command: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
+# ========== ОБРАБОТЧИК ОТПРАВКИ СООБЩЕНИЙ ==========
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('send_msg_'))
+def handle_send_message(call):
+    try:
+        data = call.data.split('_')
+        target_user_id = int(data[2])
+        order_id = int(data[3]) if len(data) > 3 else 0
+        
+        user = get_user(call.from_user.id)
+        if not user:
+            bot.answer_callback_query(call.id, "❌ Нажмите /start", show_alert=True)
+            return
+        
+        target_user = get_user_by_id(target_user_id)
+        if not target_user:
+            bot.answer_callback_query(call.id, "❌ Пользователь не найден", show_alert=True)
+            return
+        
+        msg_data[call.from_user.id] = {'target': target_user_id, 'order_id': order_id}
+        
+        bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
+        bot.send_message(
+            call.message.chat.id,
+            f"📝 Напишите сообщение для {target_user[2] or 'пользователя'}:\n"
+            f"(для отмены отправьте /cancel)"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка в handle_send_message: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка", show_alert=True)
+
+@bot.message_handler(commands=['cancel'])
+def cancel_message(message):
+    try:
+        if message.from_user.id in msg_data:
+            del msg_data[message.from_user.id]
+            bot.reply_to(message, "❌ Отправка сообщения отменена.", reply_markup=get_main_kb(message.from_user.id))
+        else:
+            bot.reply_to(message, "❌ Нет активной отправки.")
+    except Exception as e:
+        logging.error(f"Ошибка в cancel_message: {e}")
+        bot.reply_to(message, "❌ Ошибка.")
+
+# ========== ПРИЁМ СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ ==========
+@bot.message_handler(func=lambda m: m.from_user.id in msg_data)
+def handle_user_message(message):
+    try:
+        uid = message.from_user.id
+        if uid not in msg_data:
+            return
+        
+        target_user_id = msg_data[uid]['target']
+        order_id = msg_data[uid]['order_id']
+        
+        target_user = get_user_by_id(target_user_id)
+        if not target_user:
+            bot.reply_to(message, "❌ Пользователь не найден.")
+            del msg_data[uid]
+            return
+        
+        # Сохраняем сообщение в БД
+        save_message(uid, target_user_id, order_id, message.text)
+        
+        # Отправляем уведомление получателю
+        try:
+            order_text = f" по заказу #{order_id}" if order_id != 0 else ""
+            bot.send_message(
+                target_user[1],
+                f"📩 НОВОЕ СООБЩЕНИЕ{order_text}\n\n"
+                f"От: {get_user(uid)[2] or 'Пользователь'}\n"
+                f"{message.text}\n\n"
+                f"📌 Чтобы ответить - используйте кнопку 'Написать' в меню заказа."
+            )
+        except:
+            pass
+        
+        bot.reply_to(message, "✅ Сообщение отправлено!")
+        
+        # Если это модератор, то не удаляем данные, чтобы он мог писать снова
+        if uid not in MODERATOR_IDS:
+            del msg_data[uid]
+        
+        # Возвращаем меню
+        user = get_user(uid)
+        if user:
+            if user[6] == 'rabotnik':
+                bot.reply_to(message, "👷 Меню работника:", reply_markup=get_worker_kb())
+            elif user[6] == 'zakazchik':
+                bot.reply_to(message, "🏢 Меню заказчика:", reply_markup=get_customer_kb())
+            elif user[6] == 'moderator' and uid in MODERATOR_IDS:
+                bot.reply_to(message, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
+        
+    except Exception as e:
+        logging.error(f"Ошибка в handle_user_message: {e}")
+        bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
+
 # ========== CALLBACK ОБРАБОТЧИК ==========
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -1419,8 +1656,94 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "⛔ Вы заблокированы", show_alert=True)
             return
         
+        # ========== СВЯЗЬ С МОДЕРАТОРОМ (из заказа) ==========
+        if data.startswith('contact_mod_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            if order:
+                msg_data[user_id] = {'target': MODERATOR_IDS[0], 'order_id': order_id}
+                bot.answer_callback_query(call.id, "📝 Напишите сообщение модератору", show_alert=False)
+                bot.send_message(
+                    call.message.chat.id,
+                    f"📝 Напишите сообщение модератору по заказу #{order_id}:\n"
+                    f"(для отмены отправьте /cancel)"
+                )
+        
+        # ========== СВЯЗЬ С ЗАКАЗЧИКОМ ==========
+        elif data.startswith('contact_customer_order_'):
+            order_id = int(data.split('_')[3])
+            order = get_order(order_id)
+            if order:
+                target_id = order[1]  # zakazchik_id
+                msg_data[user_id] = {'target': target_id, 'order_id': order_id}
+                target_user = get_user_by_id(target_id)
+                target_name = target_user[2] if target_user else "заказчиком"
+                bot.answer_callback_query(call.id, f"📝 Напишите {target_name}", show_alert=False)
+                bot.send_message(
+                    call.message.chat.id,
+                    f"📝 Напишите сообщение заказчику по заказу #{order_id}:\n"
+                    f"(для отмены отправьте /cancel)"
+                )
+        
+        # ========== СВЯЗЬ С РАБОТНИКОМ ==========
+        elif data.startswith('contact_worker_order_'):
+            order_id = int(data.split('_')[3])
+            workers = get_workers_for_order(order_id)
+            if workers:
+                # Если несколько работников - показываем список
+                if len(workers) > 1:
+                    kb = InlineKeyboardMarkup()
+                    for w_id in workers:
+                        w = get_user_by_id(w_id)
+                        if w:
+                            kb.add(InlineKeyboardButton(f"👤 {w[2] or 'Работник'}", callback_data=f"send_msg_{w_id}_{order_id}"))
+                    bot.send_message(call.message.chat.id, "👥 Выберите работника:", reply_markup=kb)
+                    bot.answer_callback_query(call.id)
+                else:
+                    target_id = workers[0]
+                    msg_data[user_id] = {'target': target_id, 'order_id': order_id}
+                    target_user = get_user_by_id(target_id)
+                    target_name = target_user[2] if target_user else "работником"
+                    bot.answer_callback_query(call.id, f"📝 Напишите {target_name}", show_alert=False)
+                    bot.send_message(
+                        call.message.chat.id,
+                        f"📝 Напишите сообщение работнику по заказу #{order_id}:\n"
+                        f"(для отмены отправьте /cancel)"
+                    )
+            else:
+                bot.answer_callback_query(call.id, "❌ Нет работников у этого заказа", show_alert=True)
+        
+        # ========== ОБЫЧНАЯ ОТПРАВКА (кнопка из контакта) ==========
+        elif data.startswith('contact_customer_'):
+            order_id = int(data.split('_')[2])
+            order = get_order(order_id)
+            if order:
+                target_id = order[1]
+                msg_data[user_id] = {'target': target_id, 'order_id': order_id}
+                bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
+                bot.send_message(
+                    call.message.chat.id,
+                    f"📝 Напишите сообщение по заказу #{order_id}:\n"
+                    f"(для отмены отправьте /cancel)"
+                )
+        
+        elif data.startswith('contact_worker_'):
+            order_id = int(data.split('_')[2])
+            workers = get_workers_for_order(order_id)
+            if workers:
+                target_id = workers[0]
+                msg_data[user_id] = {'target': target_id, 'order_id': order_id}
+                bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
+                bot.send_message(
+                    call.message.chat.id,
+                    f"📝 Напишите сообщение по заказу #{order_id}:\n"
+                    f"(для отмены отправьте /cancel)"
+                )
+            else:
+                bot.answer_callback_query(call.id, "❌ Нет работников", show_alert=True)
+
         # ========== ВЗЯТЬ ЗАКАЗ ==========
-        if data.startswith('take_'):
+        elif data.startswith('take_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
             
@@ -1770,11 +2093,6 @@ def handle_callbacks(call):
             # Сохраняем состояние, что ждём фото
             order_data[f'waiting_photo_{user[0]}_{order_id}'] = True
         
-        # ========== ПРИЁМ ФОТО ОТ РАБОТНИКА ==========
-        elif data == 'i_paid' or data == 'confirm_payment' or data == 'send_photo':
-            # Это заглушка, чтобы не падало
-            pass
-        
         # ========== ЗАКАЗЧИК ОДОБРЯЕТ РАБОТУ ==========
         elif data.startswith('approve_'):
             order_id = int(data.split('_')[2])
@@ -2091,7 +2409,7 @@ def handle_photo(message):
 # ========== ЗАБЛОКИРОВАННЫЙ ==========
 
 @bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
-def contact_moderator(message):
+def contact_moderator_blocked(message):
     try:
         uid = message.from_user.id
         user = get_user(uid)
@@ -2107,7 +2425,7 @@ def contact_moderator(message):
         
         bot.reply_to(message, "✅ Запрос отправлен модератору.")
     except Exception as e:
-        logging.error(f"Ошибка в contact_moderator: {e}")
+        logging.error(f"Ошибка в contact_moderator_blocked: {e}")
         bot.reply_to(message, "❌ Ошибка. Попробуйте позже.")
 
 # ========== FALLBACK ==========
