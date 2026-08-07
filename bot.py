@@ -5,17 +5,24 @@ from datetime import datetime
 import threading
 import time
 import logging
+import os
 
-# ========== НАСТРОЙКИ ==========
-TOKEN = '8866034224:AAHwRqkDACIpSuK6fypCTJFChnfwii0RgEo'
+# ========================================
+# НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# ========================================
 
-# СПИСОК МОДЕРАТОРОВ (владельцев)
-MODERATOR_IDS = [
-    8746212340,  # Твой ID
-]
+TOKEN = os.getenv('TOKEN')
+if not TOKEN:
+    raise ValueError("❌ Ошибка: TOKEN не задан! Добавь переменную окружения TOKEN в Railway.")
 
-# НОМЕР СБП (пока заглушка, потом подставишь свой)
-SBP_PHONE = '+7XXXXXXXXXX'
+MODERATOR_IDS = os.getenv('MODERATOR_IDS', '8746212340')
+MODERATOR_IDS = [int(x.strip()) for x in MODERATOR_IDS.split(',')]
+
+SBP_PHONE = os.getenv('SBP_PHONE', '+7XXXXXXXXXX')
+COMMISSION_PER_HOUR = int(os.getenv('COMMISSION_PER_HOUR', '50'))
+PRICE_PER_HOUR = int(os.getenv('PRICE_PER_HOUR', '500'))
+CONFIRM_TIMEOUT = int(os.getenv('CONFIRM_TIMEOUT', '30'))
+BOT_NAME = os.getenv('BOT_NAME', 'Юрга-Подработка')
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -134,7 +141,7 @@ ORDER_STATUSES = {
     'cancelled': '❌ Отменён'
 }
 
-# ========== ФУНКЦИИ РАБОТЫ С БД (С ПРОВЕРКАМИ) ==========
+# ========== ФУНКЦИИ РАБОТЫ С БД ==========
 def get_user(telegram_id):
     try:
         c = db.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
@@ -517,7 +524,7 @@ def start(message):
         if not user:
             db.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?)", (uid,))
             db.commit()
-            bot.reply_to(message, "👋 Добро пожаловать в бот Юрга-Подработка!\n\nВыберите свою роль:", reply_markup=get_main_kb(uid))
+            bot.reply_to(message, f"👋 Добро пожаловать в бот {BOT_NAME}!\n\nВыберите свою роль:", reply_markup=get_main_kb(uid))
             return
         
         if user[11] == 1:
@@ -1073,8 +1080,8 @@ def get_order_people(message, uid):
         
         hours = order_data[uid]['hours']
         
-        total = hours * people * 500
-        commission = hours * people * 50
+        total = hours * people * PRICE_PER_HOUR
+        commission = hours * people * COMMISSION_PER_HOUR
         payout = (total - commission) // people
         
         name = user[2] if user[2] else "Заказчик"
@@ -2551,7 +2558,7 @@ def fallback(message):
 
 if __name__ == "__main__":
     logging.info("🚀 Бот запущен!")
-    print("🤖 Бот Юрга-Подработка запущен!")
+    print(f"🤖 Бот {BOT_NAME} запущен!")
     print(f"📊 Модераторы: {MODERATOR_IDS}")
     print(f"💳 СБП: {SBP_PHONE}")
     print("✅ Готов к работе!")
