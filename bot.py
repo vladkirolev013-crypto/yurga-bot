@@ -15,7 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 TOKEN = os.getenv('TOKEN')
 if not TOKEN:
-    raise ValueError("❌ Ошибка: TOKEN не задан!")
+    raise ValueError("❌ TOKEN не задан!")
 
 MODERATOR_IDS = os.getenv('MODERATOR_IDS', '8746212340')
 MODERATOR_IDS = [int(x.strip()) for x in MODERATOR_IDS.split(',')]
@@ -341,7 +341,7 @@ def mark_messages_read(user_id):
 def get_all_workers(limit=50):
     try:
         with db.transaction() as c:
-            c.execute("SELECT id, name, phone, rating, blocked, on_shift FROM users WHERE role = 'rabotnik' AND agreement_accepted = 1 ORDER BY rating DESC LIMIT ?", (limit,))
+            c.execute("SELECT id, name, phone, rating, blocked, on_shift FROM users WHERE role = 'rabotnik' ORDER BY rating DESC LIMIT ?", (limit,))
             return [dict(row) for row in c.fetchall()]
     except Exception as e:
         logger.error(f"❌ Ошибка get_all_workers: {e}")
@@ -350,7 +350,7 @@ def get_all_workers(limit=50):
 def get_all_customers(limit=50):
     try:
         with db.transaction() as c:
-            c.execute("SELECT id, name, phone, customer_rating, blocked FROM users WHERE role = 'zakazchik' AND agreement_accepted = 1 ORDER BY customer_rating DESC LIMIT ?", (limit,))
+            c.execute("SELECT id, name, phone, customer_rating, blocked FROM users WHERE role = 'zakazchik' ORDER BY customer_rating DESC LIMIT ?", (limit,))
             return [dict(row) for row in c.fetchall()]
     except Exception as e:
         logger.error(f"❌ Ошибка get_all_customers: {e}")
@@ -617,7 +617,7 @@ def moderator_payout_kb(order_id):
     kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
     return kb
 
-# ===================== ОБРАБОТЧИК КОМАНДЫ /start =====================
+# ===================== ОБРАБОТЧИКИ КОМАНД =====================
 @bot.message_handler(commands=['start'])
 def start(message):
     try:
@@ -645,7 +645,6 @@ def start(message):
         logger.error(f"❌ Ошибка в start: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ===================== ВЫБОР РОЛИ =====================
 @bot.message_handler(func=lambda m: m.text in ['👷 Я работник', '🏢 Я заказчик', '🛡️ Я модератор'])
 def role_choice(message):
     try:
@@ -704,16 +703,7 @@ def reg_start(message):
         if role == 'rabotnik':
             text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n1. Вы берёте заказ только если готовы его выполнить.\n2. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте (кнопка 'Я на месте').\n3. После работы отправьте ФОТО выполненной работы.\n4. Без фото и подтверждения заказчик не сможет подтвердить работу, и вы не получите выплату.\n5. Сервис гарантирует выплату после подтверждения заказчиком.\n6. Сервис не отвечает за травмы, кражи, качество вашей работы.\n\n✅ Принимаете условия?"
         else:
-            text = """📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)
-
-🔹 Вы платите ДО начала работы — деньги замораживаются на счёте сервиса.
-🔹 Это гарантирует, что работники получат оплату после выполнения.
-🔹 После того как работники подтвердят, что они на месте, вы переводите деньги.
-🔹 Если работа выполнена качественно, вы подтверждаете это — деньги перечисляются работникам.
-🔹 Если работа выполнена плохо или не выполнена — вы можете отклонить, и мы вернём вам деньги (после проверки модератором).
-🔹 Сервис защищает и вас, и работников от недобросовестных исполнителей.
-
-✅ Принимаете условия?"""
+            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)\n\n🔹 Вы платите ДО начала работы — деньги замораживаются на счёте сервиса.\n🔹 Это гарантирует, что работники получат оплату после выполнения.\n🔹 После того как работники подтвердят, что они на месте, вы переводите деньги.\n🔹 Если работа выполнена качественно, вы подтверждаете это — деньги перечисляются работникам.\n🔹 Если работа выполнена плохо или не выполнена — вы можете отклонить, и мы вернём вам деньги (после проверки модератором).\n🔹 Сервис защищает и вас, и работников от недобросовестных исполнителей.\n\n✅ Принимаете условия?"
         safe_send(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logger.error(f"❌ Ошибка в reg_start: {e}")
@@ -844,7 +834,7 @@ def finish_customer_reg(message, uid):
         logger.error(f"❌ Ошибка в finish_customer_reg: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ===================== РАБОТНИК =====================
+# ===================== РАБОТНИК И ЗАКАЗЧИК =====================
 @bot.message_handler(func=lambda m: m.text == '🔄 Сменить смену')
 def toggle_shift(message):
     try:
@@ -892,30 +882,49 @@ def free_orders(message):
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 @bot.message_handler(func=lambda m: m.text == '📋 Мои заказы')
-def my_worker_orders(message):
+def my_orders(message):
     try:
         uid = message.from_user.id
         user = get_user(uid)
-        if not user or user['role'] != 'rabotnik':
-            safe_send(message.chat.id, "❌ Только для работников.")
+        if not user:
+            safe_send(message.chat.id, "❌ Нажмите /start")
             return
         if user['blocked'] == 1:
             safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
             return
-        orders = get_worker_orders(user['id'])
-        if not orders:
-            safe_send(message.chat.id, "📭 Нет активных заказов.")
-            return
-        for o in orders:
-            status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
-                          'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
-                          'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
-            text = f"🆔 Заказ #{o['id']}\n📊 {status_text}\n💵 {o['payout']} ₽\n👤 {o['zakazchik_name']}\n📍 {o['address']}"
-            kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{o['id']}"))
-            safe_send(message.chat.id, text, reply_markup=kb)
+        
+        if user['role'] == 'rabotnik':
+            orders = get_worker_orders(user['id'])
+            if not orders:
+                safe_send(message.chat.id, "📭 Нет активных заказов.")
+                return
+            for o in orders:
+                status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
+                              'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
+                              'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
+                text = f"🆔 Заказ #{o['id']}\n📊 {status_text}\n💵 {o['payout']} ₽\n👤 {o['zakazchik_name']}\n📍 {o['address']}"
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{o['id']}"))
+                safe_send(message.chat.id, text, reply_markup=kb)
+        elif user['role'] == 'zakazchik':
+            orders = get_customer_orders(user['id'])
+            if not orders:
+                safe_send(message.chat.id, "📭 У вас нет заказов.")
+                return
+            for o in orders:
+                status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
+                              'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
+                              'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
+                text = f"🆔 Заказ #{o['id']}\n💰 {o['total_sum']} ₽\n📊 {status_text}"
+                kb = InlineKeyboardMarkup()
+                workers = get_workers_for_order(o['id'])
+                if workers:
+                    kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{o['id']}"))
+                safe_send(message.chat.id, text, reply_markup=kb)
+        else:
+            safe_send(message.chat.id, "❌ Неизвестная роль.")
     except Exception as e:
-        logger.error(f"❌ Ошибка в my_worker_orders: {e}")
+        logger.error(f"❌ Ошибка в my_orders: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 @bot.message_handler(func=lambda m: m.text == '💰 Мои выплаты')
@@ -1082,35 +1091,6 @@ def get_order_people(message, uid):
         msg = safe_send(message.chat.id, "👥 Введите количество человек:")
         bot.register_next_step_handler(msg, get_order_people, uid)
 
-@bot.message_handler(func=lambda m: m.text == '📋 Мои заказы')
-def my_orders_customer(message):
-    try:
-        uid = message.from_user.id
-        user = get_user(uid)
-        if not user or user['role'] != 'zakazchik':
-            safe_send(message.chat.id, "❌ Только для заказчиков.")
-            return
-        if user['blocked'] == 1:
-            safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
-            return
-        orders = get_customer_orders(user['id'])
-        if not orders:
-            safe_send(message.chat.id, "📭 У вас нет заказов.")
-            return
-        for o in orders:
-            status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
-                          'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
-                          'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
-            text = f"🆔 Заказ #{o['id']}\n💰 {o['total_sum']} ₽\n📊 {status_text}"
-            kb = InlineKeyboardMarkup()
-            workers = get_workers_for_order(o['id'])
-            if workers:
-                kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{o['id']}"))
-            safe_send(message.chat.id, text, reply_markup=kb)
-    except Exception as e:
-        logger.error(f"❌ Ошибка в my_orders_customer: {e}")
-        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
-
 @bot.message_handler(func=lambda m: m.text == '⚠️ Пожаловаться')
 def complain(message):
     try:
@@ -1196,9 +1176,9 @@ def moderator_commands(message):
             with db.transaction() as c:
                 c.execute("SELECT COUNT(*) FROM users")
                 total = c.fetchone()[0] or 0
-                c.execute("SELECT COUNT(*) FROM users WHERE role = 'rabotnik' AND agreement_accepted = 1")
+                c.execute("SELECT COUNT(*) FROM users WHERE role = 'rabotnik'")
                 workers = c.fetchone()[0] or 0
-                c.execute("SELECT COUNT(*) FROM users WHERE role = 'zakazchik' AND agreement_accepted = 1")
+                c.execute("SELECT COUNT(*) FROM users WHERE role = 'zakazchik'")
                 customers = c.fetchone()[0] or 0
                 c.execute("SELECT COUNT(*) FROM orders")
                 orders = c.fetchone()[0] or 0
