@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import random
+import json
 from contextlib import contextmanager
 
 # ========================================
@@ -117,10 +118,18 @@ class Database:
                 expires_at TEXT
             )''')
             c.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_users_on_shift ON users(on_shift)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_orders_zakazchik_id ON orders(zakazchik_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_assignments_order_id ON assignments(order_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_assignments_user_id ON assignments(user_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_user_id ON messages(to_user_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(read)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_temp_states_user_id ON temp_states(user_id)")
+            c.execute("DELETE FROM temp_states WHERE expires_at < datetime('now')")
             self.conn.commit()
-            logger.info("✅ БД инициализирована")
+            logger.info("✅ База данных инициализирована")
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
             raise
@@ -136,7 +145,6 @@ class Database:
                 break
             except sqlite3.OperationalError as e:
                 if "locked" in str(e) and attempt < max_retries - 1:
-                    logger.warning(f"⚠️ БД заблокирована, попытка {attempt+1}/{max_retries}")
                     time.sleep(random.uniform(0.3, 0.8))
                     continue
                 self.conn.rollback()
@@ -164,6 +172,13 @@ def safe_edit(text, chat_id, msg_id, **kwargs):
         logger.error(f"❌ Ошибка редактирования: {e}")
         return None
 
+def safe_send_photo(chat_id, photo, caption=None, **kwargs):
+    try:
+        return bot.send_photo(chat_id, photo, caption=caption, **kwargs)
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки фото {chat_id}: {e}")
+        return None
+
 # ========== ФУНКЦИИ РАБОТЫ С БД ==========
 def get_user(telegram_id):
     try:
@@ -184,6 +199,15 @@ def get_user_by_id(user_id):
     except Exception as e:
         logger.error(f"❌ Ошибка get_user_by_id: {e}")
         return None
+
+def update_user(telegram_id, field, value):
+    try:
+        with db.transaction() as c:
+            c.execute(f"UPDATE users SET {field} = ? WHERE telegram_id = ?", (value, telegram_id))
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка update_user: {e}")
+        return False
 
 def get_order(order_id):
     try:
@@ -403,7 +427,8 @@ def get_customer_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("📝 Регистрация"), KeyboardButton("📝 Создать заказ"))
     kb.row(KeyboardButton("📋 Мои заказы"), KeyboardButton("👤 Профиль"))
-    kb.row(KeyboardButton("⚠️ Пожаловаться"), KeyboardButton("⬅️ Назад"))
+    kb.row(KeyboardButton("📞 Связаться с модератором"), KeyboardButton("⚠️ Пожаловаться"))
+    kb.row(KeyboardButton("⬅️ Назад"))
     return kb
 
 def get_moderator_kb():
@@ -426,9 +451,11 @@ def order_inline_kb(order_id, is_customer=False):
     kb = InlineKeyboardMarkup()
     if is_customer:
         kb.add(InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_id}"))
+        kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{order_id}"))
         kb.add(InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_id}"))
     else:
         kb.add(InlineKeyboardButton("📋 Взять заказ", callback_data=f"take_{order_id}"))
+        kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{order_id}"))
     return kb
 
 def confirm_take_kb(order_id):
@@ -464,9 +491,7 @@ def moderator_payout_kb(order_id):
     kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
     return kb
 
-# ========================================
-# ОБРАБОТЧИКИ БОТА
-# ========================================
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 @bot.message_handler(commands=['start'])
 def start(message):
     try:
@@ -550,9 +575,9 @@ def reg_start(message):
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
         if role == 'rabotnik':
-            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n1. Сервис - посредник между заказчиками и работниками\n2. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте\n3. После работы отправьте ФОТО\n4. Без фото - вы не получите выплату\n\n✅ Принимаете условия?"
+            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n1. Сервис - посредник\n2. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте\n3. После работы отправьте ФОТО\n4. Без фото - вы не получите выплату\n\n✅ Принимаете?"
         else:
-            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)\n\n1. Вы платите ДО начала работы\n2. Деньги замораживаются до завершения\n3. После подтверждения качества деньги уходят работникам\n4. Сервис не отвечает за качество работы\n\n✅ Принимаете условия?"
+            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)\n\n1. Вы платите ДО начала работы\n2. Деньги замораживаются до завершения\n3. После подтверждения качества деньги уходят работникам\n\n✅ Принимаете?"
         safe_send(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logger.error(f"❌ Ошибка в reg_start: {e}")
@@ -584,12 +609,11 @@ def handle_agreement(message):
 
 def get_worker_name(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['name'] = message.text
         save_state(uid, 'registration', json.dumps(data_obj))
-        msg = safe_send(message.chat.id, "📞 Введите номер телефона (в формате +7XXXXXXXXXX):")
+        msg = safe_send(message.chat.id, "📞 Введите номер телефона (+7XXXXXXXXXX):")
         bot.register_next_step_handler(msg, get_worker_phone, uid)
     except Exception as e:
         logger.error(f"❌ Ошибка в get_worker_name: {e}")
@@ -597,7 +621,6 @@ def get_worker_name(message, uid):
 
 def get_worker_phone(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['phone'] = message.text
@@ -610,12 +633,11 @@ def get_worker_phone(message, uid):
 
 def get_worker_bank(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['bank'] = message.text
         save_state(uid, 'registration', json.dumps(data_obj))
-        msg = safe_send(message.chat.id, "📝 Введите инициалы (например: Иванов И.И.):")
+        msg = safe_send(message.chat.id, "📝 Введите инициалы (Иванов И.И.):")
         bot.register_next_step_handler(msg, finish_worker_reg, uid)
     except Exception as e:
         logger.error(f"❌ Ошибка в get_worker_bank: {e}")
@@ -623,7 +645,6 @@ def get_worker_bank(message, uid):
 
 def finish_worker_reg(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         with db.transaction() as c:
@@ -637,12 +658,11 @@ def finish_worker_reg(message, uid):
 
 def get_customer_name(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['name'] = message.text
         save_state(uid, 'registration', json.dumps(data_obj))
-        msg = safe_send(message.chat.id, "📞 Введите номер телефона (в формате +7XXXXXXXXXX):")
+        msg = safe_send(message.chat.id, "📞 Введите номер телефона (+7XXXXXXXXXX):")
         bot.register_next_step_handler(msg, get_customer_phone, uid)
     except Exception as e:
         logger.error(f"❌ Ошибка в get_customer_name: {e}")
@@ -650,7 +670,6 @@ def get_customer_name(message, uid):
 
 def get_customer_phone(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['phone'] = message.text
@@ -662,7 +681,6 @@ def get_customer_phone(message, uid):
 
 def finish_customer_reg(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         with db.transaction() as c:
@@ -681,16 +699,15 @@ def toggle_shift(message):
         uid = message.from_user.id
         user = get_user(uid)
         if not user or user['role'] != 'rabotnik':
-            safe_send(message.chat.id, "❌ Эта функция только для работников.")
+            safe_send(message.chat.id, "❌ Только для работников.")
             return
         if user['blocked'] == 1:
             safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
             return
-        current_shift = user['on_shift']
-        new_shift = 0 if current_shift == 1 else 1
+        new_shift = 0 if user['on_shift'] == 1 else 1
         update_user(uid, 'on_shift', new_shift)
         status = "на смене 🟢" if new_shift == 1 else "не на смене 🔴"
-        safe_send(message.chat.id, f"🔄 Статус смены: {status}", reply_markup=get_worker_kb())
+        safe_send(message.chat.id, f"🔄 Статус: {status}", reply_markup=get_worker_kb())
     except Exception as e:
         logger.error(f"❌ Ошибка в toggle_shift: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
@@ -713,8 +730,8 @@ def free_orders(message):
             safe_send(message.chat.id, "📭 Нет свободных заказов.")
             return
         for row in rows:
-            text = f"🆔 Заказ #{row['id']}\n💵 Выплата: {row['payout_per_person']} ₽\n📍 Адрес: {row['address']}\n⏱ Часы: {row['hours']} ч.\n👥 Нужно: {row['people']} чел."
-            safe_send(message.chat.id, text, reply_markup=order_inline_kb(row['id']))
+            text = f"🆔 Заказ #{row['id']}\n💵 {row['payout_per_person']} ₽\n📍 {row['address']}\n⏱ {row['hours']} ч.\n👥 {row['people']} чел."
+            safe_send(message.chat.id, text, reply_markup=order_inline_kb(row['id'], is_customer=False))
     except Exception as e:
         logger.error(f"❌ Ошибка в free_orders: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
@@ -735,8 +752,10 @@ def my_worker_orders(message):
             status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
                           'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
                           'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
-            text = f"🆔 Заказ #{o['id']}\n📊 Статус: {status_text}\n💵 Выплата: {o['payout']} ₽\n👤 Заказчик: {o['zakazchik_name']}\n📍 Адрес: {o['address']}"
-            safe_send(message.chat.id, text)
+            text = f"🆔 Заказ #{o['id']}\n📊 {status_text}\n💵 {o['payout']} ₽\n👤 {o['zakazchik_name']}\n📍 {o['address']}"
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("📞 Написать заказчику", callback_data=f"contact_customer_order_{o['id']}"))
+            safe_send(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logger.error(f"❌ Ошибка в my_worker_orders: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
@@ -776,6 +795,36 @@ def profile(message):
         logger.error(f"❌ Ошибка в profile: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
+@bot.message_handler(func=lambda m: m.text == '📞 Связаться с модератором')
+def contact_moderator_worker(message):
+    try:
+        uid = message.from_user.id
+        user = get_user(uid)
+        if not user:
+            return
+        if user['blocked'] == 1:
+            safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
+            return
+        if user['role'] not in ('rabotnik', 'zakazchik'):
+            safe_send(message.chat.id, "❌ Эта функция недоступна.")
+            return
+        msg = safe_send(message.chat.id, "📝 Напишите сообщение модератору:")
+        bot.register_next_step_handler(msg, send_to_moderator, uid)
+    except Exception as e:
+        logger.error(f"❌ Ошибка в contact_moderator_worker: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def send_to_moderator(message, uid):
+    try:
+        user = get_user(uid)
+        text = f"📩 СООБЩЕНИЕ ОТ {user['role']}\n\nОт: {user['name'] or 'без имени'} (ID {user['id']})\nТелефон: {user['phone'] or 'не указан'}\n\n{message.text}"
+        for m in MODERATOR_IDS:
+            safe_send(m, text)
+        safe_send(message.chat.id, "✅ Сообщение отправлено модератору.", reply_markup=get_worker_kb() if user['role']=='rabotnik' else get_customer_kb())
+    except Exception as e:
+        logger.error(f"❌ Ошибка в send_to_moderator: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
 # ========== ЗАКАЗЧИК ==========
 @bot.message_handler(func=lambda m: m.text == '📝 Создать заказ')
 def create_order_start(message):
@@ -792,7 +841,7 @@ def create_order_start(message):
             safe_send(message.chat.id, "❌ Пройдите регистрацию.")
             return
         save_state(uid, 'create_order', '{}')
-        msg = safe_send(message.chat.id, "📍 Введите адрес выполнения работы:")
+        msg = safe_send(message.chat.id, "📍 Введите адрес:")
         bot.register_next_step_handler(msg, get_order_address, uid)
     except Exception as e:
         logger.error(f"❌ Ошибка в create_order_start: {e}")
@@ -800,7 +849,6 @@ def create_order_start(message):
 
 def get_order_address(message, uid):
     try:
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['address'] = message.text
@@ -815,7 +863,6 @@ def get_order_hours(message, uid):
     try:
         hours = int(message.text)
         if hours <= 0: raise ValueError
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         data_obj['hours'] = hours
@@ -835,7 +882,6 @@ def get_order_people(message, uid):
         if not user:
             safe_send(message.chat.id, "❌ Пользователь не найден.")
             return
-        import json
         state, data = get_state(uid)
         data_obj = json.loads(data) if data else {}
         hours = data_obj.get('hours', 1)
@@ -849,14 +895,14 @@ def get_order_people(message, uid):
                      (user['id'], user['name'] or 'Заказчик', address, hours, people, total, commission, payout, 'open', datetime.now().isoformat()))
             order_id = c.lastrowid
         clear_state(uid)
-        safe_send(message.chat.id, f"✅ ЗАКАЗ #{order_id} СОЗДАН!\n\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел.\n💰 К оплате: {total} ₽", reply_markup=get_customer_kb())
+        safe_send(message.chat.id, f"✅ ЗАКАЗ #{order_id} СОЗДАН!\n\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел.\n💰 {total} ₽", reply_markup=get_customer_kb())
         workers = get_workers()
         if workers:
-            text = f"🔔 НОВЫЙ ЗАКАЗ!\n🆔 #{order_id}\n💵 Выплата: {payout} ₽\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел."
+            text = f"🔔 НОВЫЙ ЗАКАЗ!\n🆔 #{order_id}\n💵 {payout} ₽\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел."
             for w in workers:
                 safe_send(w, text)
         for m in MODERATOR_IDS:
-            safe_send(m, f"📊 НОВЫЙ ЗАКАЗ #{order_id}\n\n👤 Заказчик: {user['name'] or 'Заказчик'}\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел.\n💰 Сумма: {total} ₽")
+            safe_send(m, f"📊 НОВЫЙ ЗАКАЗ #{order_id}\n\n👤 {user['name'] or 'Заказчик'}\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел.\n💰 {total} ₽")
     except:
         safe_send(message.chat.id, "❌ Введите положительное число.")
         msg = safe_send(message.chat.id, "👥 Введите количество человек:")
@@ -878,8 +924,12 @@ def my_orders_customer(message):
             status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
                           'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
                           'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
-            text = f"🆔 Заказ #{o['id']}\n💰 Сумма: {o['total_sum']} ₽\n📊 Статус: {status_text}"
-            safe_send(message.chat.id, text)
+            text = f"🆔 Заказ #{o['id']}\n💰 {o['total_sum']} ₽\n📊 {status_text}"
+            kb = InlineKeyboardMarkup()
+            workers = get_workers_for_order(o['id'])
+            if workers:
+                kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{o['id']}"))
+            safe_send(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logger.error(f"❌ Ошибка в my_orders_customer: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
@@ -910,11 +960,12 @@ def send_complaint(message, uid):
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 # ========== МОДЕРАТОР ==========
-@bot.message_handler(func=lambda m: m.text in ['💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', '🏢 Заказчики', '📊 Статистика'] and m.from_user.id in MODERATOR_IDS)
+@bot.message_handler(func=lambda m: m.text in ['💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', '🏢 Заказчики', '📊 Статистика', '⭐ Оценить работника', '⭐ Оценить заказчика', '⚖️ Арбитраж', '🔒 Блокировка', '🔓 Разблокировка', '📨 Сообщения'] and m.from_user.id in MODERATOR_IDS)
 def moderator_commands(message):
     try:
         uid = message.from_user.id
         text = message.text
+        
         if text == '💰 Выплаты':
             with db.transaction() as c:
                 c.execute("SELECT SUM(payout) FROM assignments")
@@ -922,6 +973,7 @@ def moderator_commands(message):
                 c.execute("SELECT COUNT(*) FROM assignments")
                 count = c.fetchone()[0] or 0
             safe_send(message.chat.id, f"💰 ВСЕГО ВЫПЛАЧЕНО\n\n💵 {total} ₽\n👥 {count} выплат")
+        
         elif text == '🟡 Активные':
             orders = get_active_orders()
             if not orders:
@@ -929,6 +981,7 @@ def moderator_commands(message):
                 return
             for row in orders[:10]:
                 safe_send(message.chat.id, f"🆔 Заказ #{row['id']}\n👤 {row['zakazchik_name']}\n📍 {row['address']}\n📊 {row['status']}\n💰 {row['total_sum']} ₽")
+        
         elif text == '✅ Завершённые':
             with db.transaction() as c:
                 c.execute("SELECT id, zakazchik_name, address, total_sum FROM orders WHERE status = 'completed' ORDER BY created_at DESC LIMIT 20")
@@ -938,6 +991,7 @@ def moderator_commands(message):
                 return
             for row in rows:
                 safe_send(message.chat.id, f"✅ Заказ #{row['id']}\n👤 {row['zakazchik_name']}\n📍 {row['address']}\n💰 {row['total_sum']} ₽")
+        
         elif text == '👥 Работники':
             workers = get_all_workers()
             if not workers:
@@ -949,6 +1003,7 @@ def moderator_commands(message):
                 block = "🔒" if w['blocked'] else "✅"
                 msg += f"{status} {block} ID {w['id']}: {w['name']}\n📞 {w['phone']}, ⭐ {w['rating']}\n"
             safe_send(message.chat.id, msg)
+        
         elif text == '🏢 Заказчики':
             customers = get_all_customers()
             if not customers:
@@ -959,6 +1014,7 @@ def moderator_commands(message):
                 block = "🔒" if c['blocked'] else "✅"
                 msg += f"{block} ID {c['id']}: {c['name']}\n📞 {c['phone']}, ⭐ {c['customer_rating']}\n"
             safe_send(message.chat.id, msg)
+        
         elif text == '📊 Статистика':
             with db.transaction() as c:
                 c.execute("SELECT COUNT(*) FROM users")
@@ -970,8 +1026,243 @@ def moderator_commands(message):
                 c.execute("SELECT COUNT(*) FROM orders")
                 orders = c.fetchone()[0] or 0
             safe_send(message.chat.id, f"📊 СТАТИСТИКА\n\n👥 Всего: {total}\n👷 Работников: {workers}\n🏢 Заказчиков: {customers}\n📦 Заказов: {orders}")
+        
+        elif text == '⭐ Оценить работника':
+            msg = safe_send(message.chat.id, "Введите ID работника:")
+            bot.register_next_step_handler(msg, mod_rate_get_user)
+        
+        elif text == '⭐ Оценить заказчика':
+            msg = safe_send(message.chat.id, "Введите ID заказчика:")
+            bot.register_next_step_handler(msg, mod_rate_customer_get)
+        
+        elif text == '⚖️ Арбитраж':
+            with db.transaction() as c:
+                c.execute("SELECT id, zakazchik_name, address, status FROM orders WHERE status IN ('waiting_approval', 'waiting_payout') LIMIT 20")
+                rows = c.fetchall()
+            if not rows:
+                safe_send(message.chat.id, "⚖️ Нет заказов для арбитража.")
+                return
+            msg = "⚖️ АРБИТРАЖ:\n\n"
+            for row in rows:
+                msg += f"🆔 #{row['id']} | {row['zakazchik_name']}\n📍 {row['address']}\nСтатус: {row['status']}\n\n"
+            msg += "Используй /arbitrate ID refund|penalty|ban"
+            safe_send(message.chat.id, msg)
+        
+        elif text == '🔒 Блокировка':
+            kb = ReplyKeyboardMarkup(resize_keyboard=True)
+            kb.row(KeyboardButton("По ID"), KeyboardButton("По телефону"))
+            kb.row(KeyboardButton("⬅️ Назад"))
+            msg = safe_send(message.chat.id, "🔒 Выберите способ:", reply_markup=kb)
+            bot.register_next_step_handler(msg, mod_block_choose_method)
+        
+        elif text == '🔓 Разблокировка':
+            msg = safe_send(message.chat.id, "Введите ID пользователя:")
+            bot.register_next_step_handler(msg, mod_unblock_by_id)
+        
+        elif text == '📨 Сообщения':
+            unread = get_unread_messages(uid)
+            if not unread:
+                safe_send(message.chat.id, "📨 Нет новых сообщений.")
+                return
+            mark_messages_read(uid)
+            msg_text = "📨 НОВЫЕ СООБЩЕНИЯ:\n\n"
+            for msg in unread[:10]:
+                from_user = get_user_by_id(msg['from_user_id'])
+                from_name = from_user['name'] if from_user else "Неизвестный"
+                order_text = f" (заказ #{msg['order_id']})" if msg['order_id'] != 0 else ""
+                msg_text += f"От: {from_name}{order_text}\n{msg['text']}\n\n"
+            if len(unread) > 10:
+                msg_text += f"\n... и ещё {len(unread)-10} сообщений"
+            safe_send(message.chat.id, msg_text)
     except Exception as e:
         logger.error(f"❌ Ошибка в moderator_commands: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ МОДЕРАТОРА ==========
+def mod_rate_get_user(message):
+    try:
+        try:
+            user_id = int(message.text)
+        except:
+            safe_send(message.chat.id, "❌ Введите число.", reply_markup=get_moderator_kb())
+            return
+        with db.transaction() as c:
+            c.execute("SELECT id, name, rating FROM users WHERE id = ? AND role = 'rabotnik'", (user_id,))
+            row = c.fetchone()
+        if not row:
+            safe_send(message.chat.id, "❌ Работник не найден.", reply_markup=get_moderator_kb())
+            return
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.row(KeyboardButton("➕ +1"), KeyboardButton("➖ -1"), KeyboardButton("⏺ 0"))
+        kb.row(KeyboardButton("⬅️ Назад"))
+        msg = safe_send(message.chat.id, f"⭐ {row['name']} (рейтинг: {row['rating']})", reply_markup=kb)
+        bot.register_next_step_handler(msg, mod_rate_apply, row['id'])
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_rate_get_user: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_rate_apply(message, user_id):
+    try:
+        if message.text not in ('➕ +1', '➖ -1', '⏺ 0'):
+            safe_send(message.chat.id, "❌ Нажмите кнопку.", reply_markup=get_moderator_kb())
+            return
+        delta = {'➕ +1': 1, '➖ -1': -1, '⏺ 0': 0}[message.text]
+        add_rating(user_id, delta)
+        with db.transaction() as c:
+            c.execute("SELECT rating FROM users WHERE id = ?", (user_id,))
+            new_rating = c.fetchone()[0] or 0
+        safe_send(message.chat.id, f"✅ Рейтинг: {new_rating}", reply_markup=get_moderator_kb())
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_rate_apply: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_rate_customer_get(message):
+    try:
+        try:
+            customer_id = int(message.text)
+        except:
+            safe_send(message.chat.id, "❌ Введите число.", reply_markup=get_moderator_kb())
+            return
+        with db.transaction() as c:
+            c.execute("SELECT id, name, customer_rating FROM users WHERE id = ? AND role = 'zakazchik'", (customer_id,))
+            row = c.fetchone()
+        if not row:
+            safe_send(message.chat.id, "❌ Заказчик не найден.", reply_markup=get_moderator_kb())
+            return
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.row(KeyboardButton("➕ +1"), KeyboardButton("➖ -1"), KeyboardButton("⏺ 0"))
+        kb.row(KeyboardButton("⬅️ Назад"))
+        msg = safe_send(message.chat.id, f"⭐ {row['name']} (рейтинг: {row['customer_rating']})", reply_markup=kb)
+        bot.register_next_step_handler(msg, mod_rate_customer_apply, row['id'])
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_rate_customer_get: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_rate_customer_apply(message, customer_id):
+    try:
+        if message.text not in ('➕ +1', '➖ -1', '⏺ 0'):
+            safe_send(message.chat.id, "❌ Нажмите кнопку.", reply_markup=get_moderator_kb())
+            return
+        delta = {'➕ +1': 1, '➖ -1': -1, '⏺ 0': 0}[message.text]
+        rate_customer(customer_id, delta)
+        with db.transaction() as c:
+            c.execute("SELECT customer_rating FROM users WHERE id = ?", (customer_id,))
+            new_rating = c.fetchone()[0] or 0
+        safe_send(message.chat.id, f"✅ Рейтинг заказчика: {new_rating}", reply_markup=get_moderator_kb())
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_rate_customer_apply: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_block_choose_method(message):
+    try:
+        if message.text == '⬅️ Назад':
+            safe_send(message.chat.id, "🛡️ Панель модератора:", reply_markup=get_moderator_kb())
+            return
+        if message.text == 'По ID':
+            msg = safe_send(message.chat.id, "Введите ID пользователя:")
+            bot.register_next_step_handler(msg, mod_block_by_id)
+        elif message.text == 'По телефону':
+            msg = safe_send(message.chat.id, "Введите номер телефона:")
+            bot.register_next_step_handler(msg, mod_block_by_phone)
+        else:
+            safe_send(message.chat.id, "❌ Нажмите кнопку.", reply_markup=get_moderator_kb())
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_block_choose_method: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_block_by_id(message):
+    try:
+        try:
+            user_id = int(message.text)
+        except:
+            safe_send(message.chat.id, "❌ Введите число.", reply_markup=get_moderator_kb())
+            return
+        with db.transaction() as c:
+            c.execute("SELECT id, name, telegram_id FROM users WHERE id = ?", (user_id,))
+            row = c.fetchone()
+        if not row:
+            safe_send(message.chat.id, "❌ Пользователь не найден.", reply_markup=get_moderator_kb())
+            return
+        with db.transaction() as c:
+            c.execute("UPDATE users SET blocked = 1 WHERE id = ?", (user_id,))
+        safe_send(message.chat.id, f"✅ {row['name']} заблокирован.", reply_markup=get_moderator_kb())
+        safe_send(row['telegram_id'], "⛔ Вы заблокированы.")
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_block_by_id: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_block_by_phone(message):
+    try:
+        phone = message.text
+        with db.transaction() as c:
+            c.execute("UPDATE users SET blocked = 1 WHERE phone = ?", (phone,))
+            c.execute("SELECT id, name, telegram_id FROM users WHERE phone = ?", (phone,))
+            rows = c.fetchall()
+        if rows:
+            safe_send(message.chat.id, f"✅ Заблокировано {len(rows)} пользователей.", reply_markup=get_moderator_kb())
+            for row in rows:
+                safe_send(row['telegram_id'], "⛔ Вы заблокированы.")
+        else:
+            safe_send(message.chat.id, "❌ Пользователь не найден.", reply_markup=get_moderator_kb())
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_block_by_phone: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+def mod_unblock_by_id(message):
+    try:
+        try:
+            user_id = int(message.text)
+        except:
+            safe_send(message.chat.id, "❌ Введите число.", reply_markup=get_moderator_kb())
+            return
+        with db.transaction() as c:
+            c.execute("SELECT id, name, telegram_id FROM users WHERE id = ? AND blocked = 1", (user_id,))
+            row = c.fetchone()
+        if not row:
+            safe_send(message.chat.id, "❌ Заблокированный пользователь не найден.", reply_markup=get_moderator_kb())
+            return
+        with db.transaction() as c:
+            c.execute("UPDATE users SET blocked = 0 WHERE id = ?", (user_id,))
+        safe_send(message.chat.id, f"✅ {row['name']} разблокирован.", reply_markup=get_moderator_kb())
+        safe_send(row['telegram_id'], "✅ Вы разблокированы.")
+    except Exception as e:
+        logger.error(f"❌ Ошибка в mod_unblock_by_id: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+@bot.message_handler(commands=['arbitrate'])
+def arbitrate_command(message):
+    try:
+        if message.from_user.id not in MODERATOR_IDS:
+            safe_send(message.chat.id, "❌ Нет прав.")
+            return
+        parts = message.text.split()
+        if len(parts) < 3:
+            safe_send(message.chat.id, "❌ /arbitrate ID refund|penalty|ban")
+            return
+        try:
+            order_id = int(parts[1])
+        except:
+            safe_send(message.chat.id, "❌ ID должно быть числом.")
+            return
+        action = parts[2].lower()
+        order = get_order(order_id)
+        if not order:
+            safe_send(message.chat.id, "❌ Заказ не найден.")
+            return
+        if action == 'refund':
+            update_order_status(order_id, 'cancelled')
+            safe_send(message.chat.id, f"✅ Заказ #{order_id} отменён, деньги возвращены.")
+        elif action == 'penalty':
+            add_rating(order['zakazchik_id'], -1)
+            safe_send(message.chat.id, f"✅ Заказчику #{order['zakazchik_id']} снижен рейтинг.")
+        elif action == 'ban':
+            with db.transaction() as c:
+                c.execute("UPDATE users SET blocked = 1 WHERE id = ?", (order['zakazchik_id'],))
+            safe_send(message.chat.id, f"✅ Заказчик #{order['zakazchik_id']} заблокирован.")
+        else:
+            safe_send(message.chat.id, "❌ Доступно: refund, penalty, ban")
+    except Exception as e:
+        logger.error(f"❌ Ошибка в arbitrate_command: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 # ========== CALLBACK ==========
@@ -988,7 +1279,51 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "⛔ Доступ запрещён", show_alert=True)
             return
 
-        if data.startswith('take_'):
+        # ===== СВЯЗЬ С МОДЕРАТОРОМ =====
+        if data.startswith('contact_mod_'):
+            order_id = int(data.split('_')[2])
+            save_state(user_id, 'msg_to_mod', str(order_id), 60)
+            bot.answer_callback_query(call.id, "📝 Напишите сообщение модератору", show_alert=False)
+            safe_send(call.message.chat.id, f"📝 Напишите сообщение модератору по заказу #{order_id}:\n(для отмены отправьте /cancel)")
+
+        # ===== СВЯЗЬ МЕЖДУ ПОЛЬЗОВАТЕЛЯМИ =====
+        elif data.startswith('contact_customer_order_'):
+            order_id = int(data.split('_')[3])
+            order = get_order(order_id)
+            if order:
+                save_state(user_id, 'msg_to_user', f"{order['zakazchik_id']}|{order_id}", 60)
+                bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
+                safe_send(call.message.chat.id, f"📝 Напишите сообщение по заказу #{order_id}:\n(для отмены отправьте /cancel)")
+
+        elif data.startswith('contact_worker_order_'):
+            order_id = int(data.split('_')[3])
+            workers = get_workers_for_order(order_id)
+            if workers:
+                if len(workers) > 1:
+                    kb = InlineKeyboardMarkup()
+                    for w_id in workers:
+                        w = get_user_by_id(w_id)
+                        if w:
+                            kb.add(InlineKeyboardButton(f"👤 {w['name'] or 'Работник'}", callback_data=f"send_msg_{w_id}_{order_id}"))
+                    safe_send(call.message.chat.id, "👥 Выберите работника:", reply_markup=kb)
+                    bot.answer_callback_query(call.id)
+                else:
+                    save_state(user_id, 'msg_to_user', f"{workers[0]}|{order_id}", 60)
+                    bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
+                    safe_send(call.message.chat.id, f"📝 Напишите сообщение по заказу #{order_id}:\n(для отмены отправьте /cancel)")
+            else:
+                bot.answer_callback_query(call.id, "❌ Нет работников", show_alert=True)
+
+        elif data.startswith('send_msg_'):
+            parts = data.split('_')
+            target_id = int(parts[2])
+            order_id = int(parts[3]) if len(parts) > 3 else 0
+            save_state(user_id, 'msg_to_user', f"{target_id}|{order_id}", 60)
+            bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
+            safe_send(call.message.chat.id, f"📝 Напишите сообщение:\n(для отмены отправьте /cancel)")
+
+        # ===== ВЗЯТЬ ЗАКАЗ =====
+        elif data.startswith('take_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
             if not order or order['status'] != 'open':
@@ -1004,22 +1339,22 @@ def handle_callbacks(call):
             with db.transaction() as c:
                 c.execute("INSERT INTO assignments (order_id, user_id, payout) VALUES (?, ?, ?)", (order_id, user['id'], order['payout_per_person']))
             new_assigned = get_assignments(order_id)
-            total_workers = order['people']
-            if len(new_assigned) >= total_workers:
+            if len(new_assigned) >= order['people']:
                 update_order_status(order_id, 'ready_to_pay')
-                text = f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n👥 Все {total_workers} работников собраны.\n📍 {order['address']}\n💰 Сумма: {order['total_sum']} ₽\n💳 Переведите по СБП: {SBP_PHONE}"
+                text = f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n👥 Все работники собраны.\n📍 {order['address']}\n💰 {order['total_sum']} ₽\n💳 Переведите по СБП: {SBP_PHONE}"
                 safe_send(order['zakazchik_id'], text, reply_markup=payment_kb(order_id))
                 for worker_id in get_workers_for_order(order_id):
                     worker = get_user_by_id(worker_id)
                     if worker:
-                        safe_send(worker['telegram_id'], f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n📍 {order['address']}\n💰 Ваша выплата: {order['payout_per_person']} ₽")
+                        safe_send(worker['telegram_id'], f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n📍 {order['address']}\n💰 {order['payout_per_person']} ₽")
                 for m in MODERATOR_IDS:
-                    safe_send(m, f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n👤 {order['zakazchik_name']}\n📍 {order['address']}\n👥 {total_workers} чел.\n💰 {order['total_sum']} ₽")
+                    safe_send(m, f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n👤 {order['zakazchik_name']}\n📍 {order['address']}\n👥 {order['people']} чел.\n💰 {order['total_sum']} ₽")
                 bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} укомплектован!", show_alert=True)
             else:
                 bot.answer_callback_query(call.id, f"✅ Вы взяли заказ #{order_id}!", show_alert=True)
             safe_edit(f"✅ Вы взяли заказ #{order_id}!\n📍 Подтвердите, что вы на месте.", call.message.chat.id, call.message.message_id, reply_markup=confirm_take_kb(order_id))
 
+        # ===== ПОДТВЕРДИТЬ МЕСТО =====
         elif data.startswith('confirm_place_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1028,17 +1363,16 @@ def handle_callbacks(call):
                 return
             confirm_worker_on_place(order_id, user['id'])
             bot.answer_callback_query(call.id, "✅ Вы подтвердили, что на месте!", show_alert=True)
-            safe_edit(f"✅ Вы подтвердили, что на месте!\n💰 Ваша выплата: {order['payout_per_person']} ₽", call.message.chat.id, call.message.message_id)
+            safe_edit(f"✅ Вы на месте!\n💰 Ваша выплата: {order['payout_per_person']} ₽", call.message.chat.id, call.message.message_id)
             assigned = get_assignments(order_id)
-            all_confirmed = all(a['confirmed'] == 1 for a in assigned)
-            if all_confirmed and order['status'] == 'open':
+            if all(a['confirmed'] == 1 for a in assigned) and order['status'] == 'open':
                 update_order_status(order_id, 'ready_to_pay')
-                text = f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n👥 Все работники подтвердили, что они на месте.\n📍 {order['address']}\n💰 Сумма: {order['total_sum']} ₽\n💳 Переведите по СБП: {SBP_PHONE}"
+                text = f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n👥 Все работники подтвердили место.\n📍 {order['address']}\n💰 {order['total_sum']} ₽\n💳 {SBP_PHONE}"
                 safe_send(order['zakazchik_id'], text, reply_markup=payment_kb(order_id))
                 for worker_id in get_workers_for_order(order_id):
                     worker = get_user_by_id(worker_id)
                     if worker:
-                        safe_send(worker['telegram_id'], f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n📍 {order['address']}\n💰 Ваша выплата: {order['payout_per_person']} ₽")
+                        safe_send(worker['telegram_id'], f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n📍 {order['address']}\n💰 {order['payout_per_person']} ₽")
                 for m in MODERATOR_IDS:
                     safe_send(m, f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n👤 {order['zakazchik_name']}\n📍 {order['address']}\n👥 {order['people']} чел.\n💰 {order['total_sum']} ₽")
 
@@ -1046,9 +1380,10 @@ def handle_callbacks(call):
             order_id = int(data.split('_')[2])
             with db.transaction() as c:
                 c.execute("DELETE FROM assignments WHERE order_id = ? AND user_id = ?", (order_id, user['id']))
-            bot.answer_callback_query(call.id, "❌ Вы отказались от заказа", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Отказ от заказа", show_alert=True)
             safe_edit("❌ Вы отказались от заказа", call.message.chat.id, call.message.message_id)
 
+        # ===== ОПЛАТА =====
         elif data.startswith('i_paid_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1084,6 +1419,7 @@ def handle_callbacks(call):
                     safe_send(worker['telegram_id'], f"✅ ЗАКАЗ #{order_id} ОПЛАЧЕН!\n📍 {order['address']}\n⏱ {order['hours']} ч.\n📸 После выполнения отправьте фото:", reply_markup=worker_photo_kb(order_id))
             safe_send(order['zakazchik_id'], f"✅ ЗАКАЗ #{order_id} ПОДТВЕРЖДЁН!\n📍 {order['address']}\n⏱ {order['hours']} ч.")
 
+        # ===== ФОТО =====
         elif data.startswith('send_photo_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1094,6 +1430,7 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "📸 Отправьте фото выполненной работы", show_alert=True)
             safe_send(call.message.chat.id, f"📸 Отправьте фото для заказа #{order_id}")
 
+        # ===== ПОДТВЕРЖДЕНИЕ ВЫПОЛНЕНИЯ =====
         elif data.startswith('approve_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1109,11 +1446,11 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "✅ Работа подтверждена!", show_alert=True)
             safe_edit(f"✅ Заказ #{order_id} выполнен!", call.message.chat.id, call.message.message_id)
             for m in MODERATOR_IDS:
-                safe_send(m, f"✅ ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n📍 {order['address']}\n💰 {order['total_sum']} ₽\n💵 Выплата: {order['payout_per_person']} ₽/чел", reply_markup=moderator_payout_kb(order_id))
+                safe_send(m, f"✅ ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n📍 {order['address']}\n💰 {order['total_sum']} ₽\n💵 {order['payout_per_person']} ₽/чел", reply_markup=moderator_payout_kb(order_id))
             for worker_id in get_workers_for_order(order_id):
                 worker = get_user_by_id(worker_id)
                 if worker:
-                    safe_send(worker['telegram_id'], f"✅ Заказ #{order_id} одобрен!\n💵 Ваша выплата: {order['payout_per_person']} ₽")
+                    safe_send(worker['telegram_id'], f"✅ Заказ #{order_id} одобрен!\n💵 {order['payout_per_person']} ₽")
 
         elif data.startswith('reject_'):
             order_id = int(data.split('_')[2])
@@ -1129,6 +1466,7 @@ def handle_callbacks(call):
             for m in MODERATOR_IDS:
                 safe_send(m, f"❌ ЗАКАЗ #{order_id} ОТКЛОНЁН!\n👤 {order['zakazchik_name']}")
 
+        # ===== ВЫПЛАТА =====
         elif data.startswith('confirm_payout_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1145,8 +1483,9 @@ def handle_callbacks(call):
             for worker_id in get_workers_for_order(order_id):
                 worker = get_user_by_id(worker_id)
                 if worker:
-                    safe_send(worker['telegram_id'], f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n💵 Вы получили выплату: {order['payout_per_person']} ₽")
+                    safe_send(worker['telegram_id'], f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n💵 {order['payout_per_person']} ₽")
 
+        # ===== ОТМЕНА =====
         elif data.startswith('cancel_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1164,6 +1503,7 @@ def handle_callbacks(call):
                 if worker:
                     safe_send(worker['telegram_id'], f"❌ Заказ #{order_id} отменён.")
 
+        # ===== ЗАВЕРШИТЬ =====
         elif data.startswith('complete_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1190,7 +1530,7 @@ def handle_callbacks(call):
         except:
             pass
 
-# ========== ФОТО ==========
+# ========== ОБРАБОТЧИК ФОТО ==========
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     try:
@@ -1213,13 +1553,75 @@ def handle_photo(message):
             workers_in_order = get_workers_for_order(order_id)
             workers_with_photo = get_assignments_with_photo(order_id)
             if len(workers_with_photo) == len(workers_in_order):
-                safe_send(order['zakazchik_id'], f"📸 Все работники отправили фото по заказу #{order_id}!\n✅ Подтвердите выполнение:", reply_markup=approve_kb(order_id))
+                safe_send(order['zakazchik_id'], f"📸 Все работники отправили фото!\n✅ Подтвердите выполнение:", reply_markup=approve_kb(order_id))
                 if order['status'] == 'working':
                     update_order_status(order_id, 'waiting_approval')
                     for m in MODERATOR_IDS:
                         safe_send(m, f"📸 Все работники отправили фото по заказу #{order_id}!")
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_photo: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ ==========
+@bot.message_handler(commands=['cancel'])
+def cancel_message(message):
+    try:
+        clear_state(message.from_user.id)
+        safe_send(message.chat.id, "❌ Отправка отменена.", reply_markup=get_main_kb(message.from_user.id))
+    except Exception as e:
+        logger.error(f"❌ Ошибка в cancel_message: {e}")
+        safe_send(message.chat.id, "❌ Ошибка.")
+
+@bot.message_handler(func=lambda m: True)
+def handle_user_message(message):
+    try:
+        uid = message.from_user.id
+        state, data = get_state(uid)
+        if not state:
+            # Fallback — молчим, ничего не делаем
+            return
+        
+        if state == 'msg_to_mod':
+            order_id = int(data)
+            text = f"📩 СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ\n\nОт: {message.from_user.first_name} (ID {uid})\nПо заказу #{order_id}\n\n{message.text}"
+            for m in MODERATOR_IDS:
+                safe_send(m, text)
+            safe_send(message.chat.id, "✅ Сообщение отправлено модератору.")
+            clear_state(uid)
+        
+        elif state == 'msg_to_user':
+            parts = data.split('|')
+            target_id = int(parts[0])
+            order_id = int(parts[1]) if len(parts) > 1 else 0
+            target_user = get_user_by_id(target_id)
+            if target_user:
+                order_text = f" по заказу #{order_id}" if order_id != 0 else ""
+                safe_send(target_user['telegram_id'], f"📩 НОВОЕ СООБЩЕНИЕ{order_text}\n\nОт: {message.from_user.first_name}\n\n{message.text}")
+                safe_send(message.chat.id, "✅ Сообщение отправлено!")
+            else:
+                safe_send(message.chat.id, "❌ Пользователь не найден.")
+            clear_state(uid)
+        
+        elif state.startswith('waiting_photo_'):
+            # Обрабатывается в handle_photo
+            pass
+    except Exception as e:
+        logger.error(f"❌ Ошибка в handle_user_message: {e}")
+        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
+
+# ========== БЛОКИРОВАННЫЙ ==========
+@bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
+def contact_moderator_blocked(message):
+    try:
+        uid = message.from_user.id
+        user = get_user(uid)
+        if not user or user['blocked'] == 0:
+            return
+        for m in MODERATOR_IDS:
+            safe_send(m, f"📞 Пользователь {uid} ({user['name'] or 'без имени'}) просит связи.")
+        safe_send(message.chat.id, "✅ Запрос отправлен модератору.")
+    except Exception as e:
+        logger.error(f"❌ Ошибка в contact_moderator_blocked: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 # ========== ЗАПУСК С АВТОПЕРЕЗАПУСКОМ ==========
