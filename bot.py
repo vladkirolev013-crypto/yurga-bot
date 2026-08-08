@@ -516,8 +516,9 @@ def update_order_status_in_sheet(order_id, status, paid_at=None, completed_at=No
         if not sheet:
             return False
         worksheet = sheet.worksheet('Заказы')
-        cell = worksheet.find(str(order_id))
-        if not cell:
+        try:
+            cell = worksheet.find(str(order_id))
+        except gspread.exceptions.CellNotFound:
             logger.warning(f"⚠️ Заказ #{order_id} не найден в Google Sheets")
             return False
         row_num = cell.row
@@ -616,7 +617,7 @@ def moderator_payout_kb(order_id):
     kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
     return kb
 
-# ===================== ОБРАБОТЧИКИ КОМАНД =====================
+# ===================== ОБРАБОТЧИК КОМАНДЫ /start =====================
 @bot.message_handler(commands=['start'])
 def start(message):
     try:
@@ -644,6 +645,7 @@ def start(message):
         logger.error(f"❌ Ошибка в start: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
+# ===================== ВЫБОР РОЛИ =====================
 @bot.message_handler(func=lambda m: m.text in ['👷 Я работник', '🏢 Я заказчик', '🛡️ Я модератор'])
 def role_choice(message):
     try:
@@ -700,9 +702,18 @@ def reg_start(message):
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
         if role == 'rabotnik':
-            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n1. Сервис - посредник\n2. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте\n3. После работы отправьте ФОТО\n4. Без фото - вы не получите выплату\n\n✅ Принимаете?"
+            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n1. Вы берёте заказ только если готовы его выполнить.\n2. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте (кнопка 'Я на месте').\n3. После работы отправьте ФОТО выполненной работы.\n4. Без фото и подтверждения заказчик не сможет подтвердить работу, и вы не получите выплату.\n5. Сервис гарантирует выплату после подтверждения заказчиком.\n6. Сервис не отвечает за травмы, кражи, качество вашей работы.\n\n✅ Принимаете условия?"
         else:
-            text = "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)\n\n1. Вы платите ДО начала работы\n2. Деньги замораживаются до завершения\n3. После подтверждения качества деньги уходят работникам\n\n✅ Принимаете?"
+            text = """📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)
+
+🔹 Вы платите ДО начала работы — деньги замораживаются на счёте сервиса.
+🔹 Это гарантирует, что работники получат оплату после выполнения.
+🔹 После того как работники подтвердят, что они на месте, вы переводите деньги.
+🔹 Если работа выполнена качественно, вы подтверждаете это — деньги перечисляются работникам.
+🔹 Если работа выполнена плохо или не выполнена — вы можете отклонить, и мы вернём вам деньги (после проверки модератором).
+🔹 Сервис защищает и вас, и работников от недобросовестных исполнителей.
+
+✅ Принимаете условия?"""
         safe_send(message.chat.id, text, reply_markup=kb)
     except Exception as e:
         logger.error(f"❌ Ошибка в reg_start: {e}")
@@ -1244,6 +1255,7 @@ def moderator_commands(message):
         logger.error(f"❌ Ошибка в moderator_commands: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
+# ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ МОДЕРАТОРА =====================
 def mod_rate_get_user(message):
     try:
         try:
