@@ -10,14 +10,8 @@ import sys
 import random
 import json
 from contextlib import contextmanager
-
-# ========== ДОБАВЛЯЕМ ДЛЯ GOOGLE SHEETS ==========
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-
-# ========================================
-# НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
-# ========================================
 
 TOKEN = os.getenv('TOKEN')
 if not TOKEN:
@@ -33,7 +27,6 @@ BOT_NAME = os.getenv('BOT_NAME', 'Юрга-Подработка')
 
 bot = telebot.TeleBot(TOKEN)
 
-# ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -44,11 +37,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== БАЗА ДАННЫХ ==========
+# ===================== БАЗА ДАННЫХ =====================
 class Database:
     _instance = None
     _lock = threading.Lock()
-    
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -56,7 +48,6 @@ class Database:
                     cls._instance = super().__new__(cls)
                     cls._instance._init_db()
         return cls._instance
-    
     def _init_db(self):
         try:
             self.conn = sqlite3.connect('rabota.db', check_same_thread=False, timeout=30)
@@ -123,21 +114,14 @@ class Database:
             )''')
             c.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_users_on_shift ON users(on_shift)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_orders_zakazchik_id ON orders(zakazchik_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_assignments_order_id ON assignments(order_id)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_assignments_user_id ON assignments(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_user_id ON messages(to_user_id)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(read)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_temp_states_user_id ON temp_states(user_id)")
-            c.execute("DELETE FROM temp_states WHERE expires_at < datetime('now')")
             self.conn.commit()
-            logger.info("✅ База данных инициализирована")
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
             raise
-    
     @contextmanager
     def transaction(self):
         max_retries = 5
@@ -159,7 +143,7 @@ class Database:
 
 db = Database()
 
-# ========== БЕЗОПАСНАЯ ОТПРАВКА ==========
+# ===================== БЕЗОПАСНАЯ ОТПРАВКА =====================
 def safe_send(chat_id, text, **kwargs):
     if not chat_id:
         return None
@@ -183,7 +167,7 @@ def safe_send_photo(chat_id, photo, caption=None, **kwargs):
         logger.error(f"❌ Ошибка отправки фото {chat_id}: {e}")
         return None
 
-# ========== ФУНКЦИИ РАБОТЫ С БД ==========
+# ===================== ФУНКЦИИ БД =====================
 def get_user(telegram_id):
     try:
         with db.transaction() as c:
@@ -235,7 +219,7 @@ def get_assignments(order_id):
 def get_workers():
     try:
         with db.transaction() as c:
-            c.execute("SELECT telegram_id FROM users WHERE role = 'rabotnik' AND on_shift = 1 AND blocked = 0")
+            c.execute("SELECT telegram_id FROM users WHERE role = 'rabotnik' AND on_shift = 1 AND blocked = 0 AND agreement_accepted = 1")
             return [row['telegram_id'] for row in c.fetchall()]
     except Exception as e:
         logger.error(f"❌ Ошибка get_workers: {e}")
@@ -357,7 +341,7 @@ def mark_messages_read(user_id):
 def get_all_workers(limit=50):
     try:
         with db.transaction() as c:
-            c.execute("SELECT id, name, phone, rating, blocked, on_shift FROM users WHERE role = 'rabotnik' ORDER BY rating DESC LIMIT ?", (limit,))
+            c.execute("SELECT id, name, phone, rating, blocked, on_shift FROM users WHERE role = 'rabotnik' AND agreement_accepted = 1 ORDER BY rating DESC LIMIT ?", (limit,))
             return [dict(row) for row in c.fetchall()]
     except Exception as e:
         logger.error(f"❌ Ошибка get_all_workers: {e}")
@@ -366,7 +350,7 @@ def get_all_workers(limit=50):
 def get_all_customers(limit=50):
     try:
         with db.transaction() as c:
-            c.execute("SELECT id, name, phone, customer_rating, blocked FROM users WHERE role = 'zakazchik' ORDER BY customer_rating DESC LIMIT ?", (limit,))
+            c.execute("SELECT id, name, phone, customer_rating, blocked FROM users WHERE role = 'zakazchik' AND agreement_accepted = 1 ORDER BY customer_rating DESC LIMIT ?", (limit,))
             return [dict(row) for row in c.fetchall()]
     except Exception as e:
         logger.error(f"❌ Ошибка get_all_customers: {e}")
@@ -381,7 +365,6 @@ def get_active_orders(limit=50):
         logger.error(f"❌ Ошибка get_active_orders: {e}")
         return []
 
-# ===== ИСПРАВЛЕННАЯ ФУНКЦИЯ SAVE_STATE =====
 def save_state(user_id, state, data=None, ttl_minutes=30):
     try:
         created_at = datetime.now().isoformat()
@@ -415,53 +398,36 @@ def clear_state(user_id):
         logger.error(f"❌ Ошибка clear_state: {e}")
         return False
 
-# ============================================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С GOOGLE SHEETS (ИСПРАВЛЕНЫ)
-# ============================================================
-
+# ===================== GOOGLE SHEETS =====================
 def get_google_sheet():
-    """Подключается к Google Sheets и возвращает объект таблицы"""
     try:
         creds_json = os.getenv('GOOGLE_CREDENTIALS')
         if not creds_json:
-            logger.error("❌ GOOGLE_CREDENTIALS не заданы в переменных окружения")
+            logger.error("❌ GOOGLE_CREDENTIALS не заданы")
             return None
-        
-        # Пробуем распарсить JSON
         try:
             creds_dict = json.loads(creds_json)
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Ошибка парсинга GOOGLE_CREDENTIALS: {e}. Проверь, что JSON валидный.")
+            logger.error(f"❌ Ошибка парсинга GOOGLE_CREDENTIALS: {e}")
             return None
-        
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        
         sheet_id = os.getenv('SPREADSHEET_ID')
         if not sheet_id:
-            logger.error("❌ SPREADSHEET_ID не задан в переменных окружения")
+            logger.error("❌ SPREADSHEET_ID не задан")
             return None
-        
         return client.open_by_key(sheet_id)
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
         return None
 
 def write_order_to_sheet(order_data):
-    """Записывает новый заказ в лист 'Заказы'"""
     try:
         sheet = get_google_sheet()
         if not sheet:
-            logger.error("❌ Не удалось получить доступ к таблице")
             return False
-        
-        try:
-            worksheet = sheet.worksheet('Заказы')
-        except gspread.exceptions.WorksheetNotFound:
-            logger.error("❌ Лист 'Заказы' не найден в таблице. Проверь название листа.")
-            return False
-        
+        worksheet = sheet.worksheet('Заказы')
         row = [
             order_data.get('id', ''),
             order_data.get('created_at', ''),
@@ -485,7 +451,6 @@ def write_order_to_sheet(order_data):
         return False
 
 def write_user_to_sheet(user_data):
-    """Записывает нового пользователя в лист 'Пользователи'"""
     try:
         sheet = get_google_sheet()
         if not sheet:
@@ -506,7 +471,6 @@ def write_user_to_sheet(user_data):
         return False
 
 def write_payout_to_sheet(payout_data):
-    """Записывает выплату в лист 'Выплаты'"""
     try:
         sheet = get_google_sheet()
         if not sheet:
@@ -529,7 +493,6 @@ def write_payout_to_sheet(payout_data):
         return False
 
 def write_commission_to_sheet(commission_data):
-    """Записывает комиссию в лист 'Комиссия'"""
     try:
         sheet = get_google_sheet()
         if not sheet:
@@ -548,37 +511,28 @@ def write_commission_to_sheet(commission_data):
         return False
 
 def update_order_status_in_sheet(order_id, status, paid_at=None, completed_at=None):
-    """Обновляет статус заказа в Google Sheets"""
     try:
         sheet = get_google_sheet()
         if not sheet:
             return False
         worksheet = sheet.worksheet('Заказы')
-        
-        # Ищем ячейку с ID заказа
-        try:
-            cell = worksheet.find(str(order_id))
-        except gspread.exceptions.CellNotFound:
+        cell = worksheet.find(str(order_id))
+        if not cell:
             logger.warning(f"⚠️ Заказ #{order_id} не найден в Google Sheets")
             return False
-        
         row_num = cell.row
         worksheet.update_cell(row_num, 11, status)
         if paid_at:
             worksheet.update_cell(row_num, 12, paid_at)
         if completed_at:
             worksheet.update_cell(row_num, 13, completed_at)
-        
         logger.info(f"✅ Статус заказа #{order_id} обновлён в Google Sheets")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка обновления статуса заказа в Google Sheets: {e}")
         return False
 
-# ============================================================
-# КЛАВИАТУРЫ
-# ============================================================
-
+# ===================== КЛАВИАТУРЫ =====================
 def get_main_kb(telegram_id=None):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("👷 Я работник"), KeyboardButton("🏢 Я заказчик"))
@@ -662,10 +616,7 @@ def moderator_payout_kb(order_id):
     kb.add(InlineKeyboardButton("✅ Выплатил работникам", callback_data=f"confirm_payout_{order_id}"))
     return kb
 
-# ============================================================
-# ОБРАБОТЧИКИ КОМАНД
-# ============================================================
-
+# ===================== ОБРАБОТЧИКИ КОМАНД =====================
 @bot.message_handler(commands=['start'])
 def start(message):
     try:
@@ -729,10 +680,7 @@ def back_to_main(message):
         logger.error(f"❌ Ошибка в back_to_main: {e}")
         safe_send(message.chat.id, "📱 Главное меню:", reply_markup=get_main_kb(None))
 
-# ============================================================
-# РЕГИСТРАЦИЯ
-# ============================================================
-
+# ===================== РЕГИСТРАЦИЯ =====================
 @bot.message_handler(func=lambda m: m.text == '📝 Регистрация')
 def reg_start(message):
     try:
@@ -829,7 +777,6 @@ def finish_worker_reg(message, uid):
                      (data_obj.get('name'), data_obj.get('phone'), data_obj.get('bank'), message.text, uid))
         clear_state(uid)
         safe_send(message.chat.id, "✅ Регистрация завершена! Вы на смене 🟢", reply_markup=get_worker_kb())
-        # Запись в Google Sheets
         user_data = {
             'telegram_id': uid,
             'name': data_obj.get('name'),
@@ -873,8 +820,7 @@ def finish_customer_reg(message, uid):
             c.execute("UPDATE users SET name=?, phone=? WHERE telegram_id=?",
                      (data_obj.get('name'), data_obj.get('phone'), uid))
         clear_state(uid)
-        safe_send(message.chat.id, "✅ Регистрация завершена!", reply_markup=get_customer_kb())
-        # Запись в Google Sheets
+        safe_send(message.chat.id, "✅ Регистрация заказчика завершена!", reply_markup=get_customer_kb())
         user_data = {
             'telegram_id': uid,
             'name': data_obj.get('name'),
@@ -887,10 +833,7 @@ def finish_customer_reg(message, uid):
         logger.error(f"❌ Ошибка в finish_customer_reg: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# РАБОТНИК
-# ============================================================
-
+# ===================== РАБОТНИК =====================
 @bot.message_handler(func=lambda m: m.text == '🔄 Сменить смену')
 def toggle_shift(message):
     try:
@@ -921,6 +864,9 @@ def free_orders(message):
         if user['blocked'] == 1:
             safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
             return
+        if user['agreement_accepted'] == 0:
+            safe_send(message.chat.id, "❌ Вы не зарегистрированы. Нажмите '📝 Регистрация'.")
+            return
         with db.transaction() as c:
             c.execute("SELECT id, payout_per_person, address, hours, people FROM orders WHERE status = 'open' ORDER BY created_at DESC LIMIT 20")
             rows = c.fetchall()
@@ -941,6 +887,9 @@ def my_worker_orders(message):
         user = get_user(uid)
         if not user or user['role'] != 'rabotnik':
             safe_send(message.chat.id, "❌ Только для работников.")
+            return
+        if user['blocked'] == 1:
+            safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
             return
         orders = get_worker_orders(user['id'])
         if not orders:
@@ -1023,10 +972,7 @@ def send_to_moderator(message, uid):
         logger.error(f"❌ Ошибка в send_to_moderator: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# ЗАКАЗЧИК
-# ============================================================
-
+# ===================== ЗАКАЗЧИК =====================
 @bot.message_handler(func=lambda m: m.text == '📝 Создать заказ')
 def create_order_start(message):
     try:
@@ -1039,7 +985,7 @@ def create_order_start(message):
             safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
             return
         if user['agreement_accepted'] == 0:
-            safe_send(message.chat.id, "❌ Пройдите регистрацию.")
+            safe_send(message.chat.id, "❌ Вы не зарегистрированы. Нажмите '📝 Регистрация'.")
             return
         save_state(uid, 'create_order', '{}')
         msg = safe_send(message.chat.id, "📍 Введите адрес:")
@@ -1098,7 +1044,6 @@ def get_order_people(message, uid):
         clear_state(uid)
         safe_send(message.chat.id, f"✅ ЗАКАЗ #{order_id} СОЗДАН!\n\n📍 {address}\n⏱ {hours} ч.\n👥 {people} чел.\n💰 {total} ₽", reply_markup=get_customer_kb())
         
-        # Запись в Google Sheets
         order_data = {
             'id': order_id,
             'created_at': datetime.now().strftime('%d.%m.%Y %H:%M'),
@@ -1134,9 +1079,12 @@ def my_orders_customer(message):
         if not user or user['role'] != 'zakazchik':
             safe_send(message.chat.id, "❌ Только для заказчиков.")
             return
+        if user['blocked'] == 1:
+            safe_send(message.chat.id, "⛔ Вы заблокированы.", reply_markup=get_blocked_kb())
+            return
         orders = get_customer_orders(user['id'])
         if not orders:
-            safe_send(message.chat.id, "📭 Нет заказов.")
+            safe_send(message.chat.id, "📭 У вас нет заказов.")
             return
         for o in orders:
             status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
@@ -1177,10 +1125,7 @@ def send_complaint(message, uid):
         logger.error(f"❌ Ошибка в send_complaint: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# МОДЕРАТОР
-# ============================================================
-
+# ===================== МОДЕРАТОР =====================
 @bot.message_handler(func=lambda m: m.text in ['💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', '🏢 Заказчики', '📊 Статистика', '⭐ Оценить работника', '⭐ Оценить заказчика', '⚖️ Арбитраж', '🔒 Блокировка', '🔓 Разблокировка', '📨 Сообщения'] and m.from_user.id in MODERATOR_IDS)
 def moderator_commands(message):
     try:
@@ -1240,9 +1185,9 @@ def moderator_commands(message):
             with db.transaction() as c:
                 c.execute("SELECT COUNT(*) FROM users")
                 total = c.fetchone()[0] or 0
-                c.execute("SELECT COUNT(*) FROM users WHERE role = 'rabotnik'")
+                c.execute("SELECT COUNT(*) FROM users WHERE role = 'rabotnik' AND agreement_accepted = 1")
                 workers = c.fetchone()[0] or 0
-                c.execute("SELECT COUNT(*) FROM users WHERE role = 'zakazchik'")
+                c.execute("SELECT COUNT(*) FROM users WHERE role = 'zakazchik' AND agreement_accepted = 1")
                 customers = c.fetchone()[0] or 0
                 c.execute("SELECT COUNT(*) FROM orders")
                 orders = c.fetchone()[0] or 0
@@ -1298,10 +1243,6 @@ def moderator_commands(message):
     except Exception as e:
         logger.error(f"❌ Ошибка в moderator_commands: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
-
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ МОДЕРАТОРА
-# ============================================================
 
 def mod_rate_get_user(message):
     try:
@@ -1489,10 +1430,7 @@ def arbitrate_command(message):
         logger.error(f"❌ Ошибка в arbitrate_command: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# CALLBACK
-# ============================================================
-
+# ===================== CALLBACK =====================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     try:
@@ -1506,14 +1444,12 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "⛔ Доступ запрещён", show_alert=True)
             return
 
-        # ===== СВЯЗЬ С МОДЕРАТОРОМ =====
         if data.startswith('contact_mod_'):
             order_id = int(data.split('_')[2])
             save_state(user_id, 'msg_to_mod', str(order_id), 60)
             bot.answer_callback_query(call.id, "📝 Напишите сообщение модератору", show_alert=False)
             safe_send(call.message.chat.id, f"📝 Напишите сообщение модератору по заказу #{order_id}:\n(для отмены отправьте /cancel)")
 
-        # ===== СВЯЗЬ МЕЖДУ ПОЛЬЗОВАТЕЛЯМИ =====
         elif data.startswith('contact_customer_order_'):
             order_id = int(data.split('_')[3])
             order = get_order(order_id)
@@ -1549,7 +1485,6 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "📝 Напишите сообщение", show_alert=False)
             safe_send(call.message.chat.id, f"📝 Напишите сообщение:\n(для отмены отправьте /cancel)")
 
-        # ===== ВЗЯТЬ ЗАКАЗ =====
         elif data.startswith('take_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1558,6 +1493,9 @@ def handle_callbacks(call):
                 return
             if user['role'] != 'rabotnik':
                 bot.answer_callback_query(call.id, "❌ Только для работников", show_alert=True)
+                return
+            if user['agreement_accepted'] == 0:
+                bot.answer_callback_query(call.id, "❌ Вы не зарегистрированы. Пройдите регистрацию в меню работника.", show_alert=True)
                 return
             assigned = get_assignments(order_id)
             if user['id'] in [a['user_id'] for a in assigned]:
@@ -1581,7 +1519,6 @@ def handle_callbacks(call):
                 bot.answer_callback_query(call.id, f"✅ Вы взяли заказ #{order_id}!", show_alert=True)
             safe_edit(f"✅ Вы взяли заказ #{order_id}!\n📍 Подтвердите, что вы на месте.", call.message.chat.id, call.message.message_id, reply_markup=confirm_take_kb(order_id))
 
-        # ===== ПОДТВЕРДИТЬ МЕСТО =====
         elif data.startswith('confirm_place_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1610,7 +1547,6 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "❌ Отказ от заказа", show_alert=True)
             safe_edit("❌ Вы отказались от заказа", call.message.chat.id, call.message.message_id)
 
-        # ===== ОПЛАТА =====
         elif data.startswith('i_paid_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1646,7 +1582,6 @@ def handle_callbacks(call):
                     safe_send(worker['telegram_id'], f"✅ ЗАКАЗ #{order_id} ОПЛАЧЕН!\n📍 {order['address']}\n⏱ {order['hours']} ч.\n📸 После выполнения отправьте фото:", reply_markup=worker_photo_kb(order_id))
             safe_send(order['zakazchik_id'], f"✅ ЗАКАЗ #{order_id} ПОДТВЕРЖДЁН!\n📍 {order['address']}\n⏱ {order['hours']} ч.")
 
-        # ===== ФОТО =====
         elif data.startswith('send_photo_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1657,7 +1592,6 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "📸 Отправьте фото выполненной работы", show_alert=True)
             safe_send(call.message.chat.id, f"📸 Отправьте фото для заказа #{order_id}")
 
-        # ===== ПОДТВЕРЖДЕНИЕ ВЫПОЛНЕНИЯ =====
         elif data.startswith('approve_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1693,7 +1627,6 @@ def handle_callbacks(call):
             for m in MODERATOR_IDS:
                 safe_send(m, f"❌ ЗАКАЗ #{order_id} ОТКЛОНЁН!\n👤 {order['zakazchik_name']}")
 
-        # ===== ВЫПЛАТА =====
         elif data.startswith('confirm_payout_'):
             order_id = int(data.split('_')[2])
             order = get_order(order_id)
@@ -1711,7 +1644,6 @@ def handle_callbacks(call):
                 worker = get_user_by_id(worker_id)
                 if worker:
                     safe_send(worker['telegram_id'], f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n💵 {order['payout_per_person']} ₽")
-            # Запись в Google Sheets: выплаты и комиссия
             if order:
                 for worker_id in get_workers_for_order(order_id):
                     worker = get_user_by_id(worker_id)
@@ -1734,7 +1666,6 @@ def handle_callbacks(call):
                 write_commission_to_sheet(commission_data)
                 update_order_status_in_sheet(order_id, 'Completed', completed_at=datetime.now().strftime('%d.%m.%Y %H:%M'))
 
-        # ===== ОТМЕНА =====
         elif data.startswith('cancel_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1751,10 +1682,8 @@ def handle_callbacks(call):
                 worker = get_user_by_id(worker_id)
                 if worker:
                     safe_send(worker['telegram_id'], f"❌ Заказ #{order_id} отменён.")
-            # Обновление статуса в Google Sheets
             update_order_status_in_sheet(order_id, 'Cancelled')
 
-        # ===== ЗАВЕРШИТЬ =====
         elif data.startswith('complete_'):
             order_id = int(data.split('_')[1])
             order = get_order(order_id)
@@ -1771,7 +1700,6 @@ def handle_callbacks(call):
             update_order_status(order_id, 'waiting_approval')
             bot.answer_callback_query(call.id, f"✅ Заказ ожидает подтверждения!", show_alert=True)
             safe_edit(f"📸 Заказ #{order_id} выполнен!\n✅ Подтвердите качество:", call.message.chat.id, call.message.message_id, reply_markup=approve_kb(order_id))
-            # Обновление статуса в Google Sheets
             update_order_status_in_sheet(order_id, 'Waiting approval')
 
         else:
@@ -1783,10 +1711,7 @@ def handle_callbacks(call):
         except:
             pass
 
-# ============================================================
-# ОБРАБОТЧИК ФОТО
-# ============================================================
-
+# ===================== ОБРАБОТЧИК ФОТО =====================
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     try:
@@ -1818,10 +1743,7 @@ def handle_photo(message):
         logger.error(f"❌ Ошибка в handle_photo: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# ОБРАБОТЧИК СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ
-# ============================================================
-
+# ===================== ОБРАБОТЧИК СООБЩЕНИЙ =====================
 @bot.message_handler(commands=['cancel'])
 def cancel_message(message):
     try:
@@ -1837,9 +1759,7 @@ def handle_user_message(message):
         uid = message.from_user.id
         state, data = get_state(uid)
         if not state:
-            # Fallback — молчим
             return
-        
         if state == 'msg_to_mod':
             order_id = int(data)
             text = f"📩 СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ\n\nОт: {message.from_user.first_name} (ID {uid})\nПо заказу #{order_id}\n\n{message.text}"
@@ -1847,7 +1767,6 @@ def handle_user_message(message):
                 safe_send(m, text)
             safe_send(message.chat.id, "✅ Сообщение отправлено модератору.")
             clear_state(uid)
-        
         elif state == 'msg_to_user':
             parts = data.split('|')
             target_id = int(parts[0])
@@ -1860,18 +1779,13 @@ def handle_user_message(message):
             else:
                 safe_send(message.chat.id, "❌ Пользователь не найден.")
             clear_state(uid)
-        
         elif state.startswith('waiting_photo_'):
-            # Обрабатывается в handle_photo
             pass
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_user_message: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# БЛОКИРОВАННЫЙ
-# ============================================================
-
+# ===================== БЛОКИРОВАННЫЙ =====================
 @bot.message_handler(func=lambda m: m.text == '📞 Связь с модератором')
 def contact_moderator_blocked(message):
     try:
@@ -1886,10 +1800,7 @@ def contact_moderator_blocked(message):
         logger.error(f"❌ Ошибка в contact_moderator_blocked: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
-# ============================================================
-# ЗАПУСК С АВТОПЕРЕЗАПУСКОМ
-# ============================================================
-
+# ===================== ЗАПУСК =====================
 def start_bot():
     while True:
         try:
