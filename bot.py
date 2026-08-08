@@ -1,7 +1,7 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 import logging
@@ -381,12 +381,16 @@ def get_active_orders(limit=50):
         logger.error(f"❌ Ошибка get_active_orders: {e}")
         return []
 
+# ===== ИСПРАВЛЕННАЯ ФУНКЦИЯ SAVE_STATE =====
 def save_state(user_id, state, data=None, ttl_minutes=30):
     try:
-        expires_at = datetime.now().isoformat()
+        created_at = datetime.now().isoformat()
+        expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
         with db.transaction() as c:
-            c.execute("INSERT OR REPLACE INTO temp_states (user_id, state, data, created_at, expires_at) VALUES (?, ?, ?, ?, datetime(?, '+? minutes'))",
-                     (user_id, state, data or '{}', expires_at, expires_at, ttl_minutes))
+            c.execute(
+                "INSERT OR REPLACE INTO temp_states (user_id, state, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, state, data or '{}', created_at, expires_at)
+            )
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка save_state: {e}")
@@ -412,7 +416,7 @@ def clear_state(user_id):
         return False
 
 # ============================================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С GOOGLE SHEETS
+# ФУНКЦИИ ДЛЯ РАБОТЫ С GOOGLE SHEETS (ИСПРАВЛЕНЫ)
 # ============================================================
 
 def get_google_sheet():
@@ -423,7 +427,13 @@ def get_google_sheet():
             logger.error("❌ GOOGLE_CREDENTIALS не заданы в переменных окружения")
             return None
         
-        creds_dict = json.loads(creds_json)
+        # Пробуем распарсить JSON
+        try:
+            creds_dict = json.loads(creds_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга GOOGLE_CREDENTIALS: {e}. Проверь, что JSON валидный.")
+            return None
+        
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
@@ -443,8 +453,15 @@ def write_order_to_sheet(order_data):
     try:
         sheet = get_google_sheet()
         if not sheet:
+            logger.error("❌ Не удалось получить доступ к таблице")
             return False
-        worksheet = sheet.worksheet('Заказы')
+        
+        try:
+            worksheet = sheet.worksheet('Заказы')
+        except gspread.exceptions.WorksheetNotFound:
+            logger.error("❌ Лист 'Заказы' не найден в таблице. Проверь название листа.")
+            return False
+        
         row = [
             order_data.get('id', ''),
             order_data.get('created_at', ''),
@@ -538,8 +555,10 @@ def update_order_status_in_sheet(order_id, status, paid_at=None, completed_at=No
             return False
         worksheet = sheet.worksheet('Заказы')
         
-        cell = worksheet.find(str(order_id))
-        if not cell:
+        # Ищем ячейку с ID заказа
+        try:
+            cell = worksheet.find(str(order_id))
+        except gspread.exceptions.CellNotFound:
             logger.warning(f"⚠️ Заказ #{order_id} не найден в Google Sheets")
             return False
         
