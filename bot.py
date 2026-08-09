@@ -563,8 +563,7 @@ def get_moderator_kb():
     kb.row(KeyboardButton("✅ Завершённые"), KeyboardButton("👥 Работники"))
     kb.row(KeyboardButton("🏢 Заказчики"), KeyboardButton("📊 Статистика"))
     kb.row(KeyboardButton("⭐ Оценить работника"), KeyboardButton("⭐ Оценить заказчика"))
-    kb.row(KeyboardButton("⚖️ Арбитраж"), KeyboardButton("🔒 Блокировка"))
-    kb.row(KeyboardButton("🔓 Разблокировка"), KeyboardButton("📨 Сообщения"))
+    kb.row(KeyboardButton("🔒 Блокировка"), KeyboardButton("🔓 Разблокировка"))
     kb.row(KeyboardButton("⬅️ Назад"))
     return kb
 
@@ -914,12 +913,15 @@ def my_orders(message):
             for o in orders:
                 status_text = {'open': '🟢 Открыт', 'in_progress': '🟡 В работе', 'ready_to_pay': '💰 Ожидает оплаты', 
                               'paid': '✅ Оплачен', 'working': '🔧 Работы ведутся', 'waiting_approval': '📸 Ждёт подтверждения',
-                              'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён'}.get(o['status'], o['status'])
+                              'waiting_payout': '💵 Ждёт выплаты', 'completed': '✅ Завершён', 'cancelled': '❌ Отменён'}.get(o['status'], o['status'])
                 text = f"🆔 Заказ #{o['id']}\n💰 {o['total_sum']} ₽\n📊 {status_text}"
                 kb = InlineKeyboardMarkup()
                 workers = get_workers_for_order(o['id'])
                 if workers:
                     kb.add(InlineKeyboardButton("📞 Написать работнику", callback_data=f"contact_worker_order_{o['id']}"))
+                # Добавляем кнопку отмены для всех статусов кроме завершённых и отменённых
+                if o['status'] not in ('completed', 'cancelled'):
+                    kb.add(InlineKeyboardButton("❌ Отменить заказ", callback_data=f"cancel_{o['id']}"))
                 safe_send(message.chat.id, text, reply_markup=kb)
         else:
             safe_send(message.chat.id, "❌ Неизвестная роль.")
@@ -1117,7 +1119,7 @@ def send_complaint(message, uid):
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 # ===================== МОДЕРАТОР =====================
-@bot.message_handler(func=lambda m: m.text in ['💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', '🏢 Заказчики', '📊 Статистика', '⭐ Оценить работника', '⭐ Оценить заказчика', '⚖️ Арбитраж', '🔒 Блокировка', '🔓 Разблокировка', '📨 Сообщения'] and m.from_user.id in MODERATOR_IDS)
+@bot.message_handler(func=lambda m: m.text in ['💰 Выплаты', '🟡 Активные', '✅ Завершённые', '👥 Работники', '🏢 Заказчики', '📊 Статистика', '⭐ Оценить работника', '⭐ Оценить заказчика', '🔒 Блокировка', '🔓 Разблокировка'] and m.from_user.id in MODERATOR_IDS)
 def moderator_commands(message):
     try:
         uid = message.from_user.id
@@ -1192,19 +1194,6 @@ def moderator_commands(message):
             msg = safe_send(message.chat.id, "Введите ID заказчика:")
             bot.register_next_step_handler(msg, mod_rate_customer_get)
         
-        elif text == '⚖️ Арбитраж':
-            with db.transaction() as c:
-                c.execute("SELECT id, zakazchik_name, address, status FROM orders WHERE status IN ('waiting_approval', 'waiting_payout') LIMIT 20")
-                rows = c.fetchall()
-            if not rows:
-                safe_send(message.chat.id, "⚖️ Нет заказов для арбитража.")
-                return
-            msg = "⚖️ АРБИТРАЖ:\n\n"
-            for row in rows:
-                msg += f"🆔 #{row['id']} | {row['zakazchik_name']}\n📍 {row['address']}\nСтатус: {row['status']}\n\n"
-            msg += "Используй /arbitrate ID refund|penalty|ban"
-            safe_send(message.chat.id, msg)
-        
         elif text == '🔒 Блокировка':
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.row(KeyboardButton("По ID"), KeyboardButton("По телефону"))
@@ -1216,21 +1205,6 @@ def moderator_commands(message):
             msg = safe_send(message.chat.id, "Введите ID пользователя:")
             bot.register_next_step_handler(msg, mod_unblock_by_id)
         
-        elif text == '📨 Сообщения':
-            unread = get_unread_messages(uid)
-            if not unread:
-                safe_send(message.chat.id, "📨 Нет новых сообщений.")
-                return
-            mark_messages_read(uid)
-            msg_text = "📨 НОВЫЕ СООБЩЕНИЯ:\n\n"
-            for msg in unread[:10]:
-                from_user = get_user_by_id(msg['from_user_id'])
-                from_name = from_user['name'] if from_user else "Неизвестный"
-                order_text = f" (заказ #{msg['order_id']})" if msg['order_id'] != 0 else ""
-                msg_text += f"От: {from_name}{order_text}\n{msg['text']}\n\n"
-            if len(unread) > 10:
-                msg_text += f"\n... и ещё {len(unread)-10} сообщений"
-            safe_send(message.chat.id, msg_text)
     except Exception as e:
         logger.error(f"❌ Ошибка в moderator_commands: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
@@ -1384,42 +1358,6 @@ def mod_unblock_by_id(message):
         safe_send(row['telegram_id'], "✅ Вы разблокированы.")
     except Exception as e:
         logger.error(f"❌ Ошибка в mod_unblock_by_id: {e}")
-        safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
-
-@bot.message_handler(commands=['arbitrate'])
-def arbitrate_command(message):
-    try:
-        if message.from_user.id not in MODERATOR_IDS:
-            safe_send(message.chat.id, "❌ Нет прав.")
-            return
-        parts = message.text.split()
-        if len(parts) < 3:
-            safe_send(message.chat.id, "❌ /arbitrate ID refund|penalty|ban")
-            return
-        try:
-            order_id = int(parts[1])
-        except:
-            safe_send(message.chat.id, "❌ ID должно быть числом.")
-            return
-        action = parts[2].lower()
-        order = get_order(order_id)
-        if not order:
-            safe_send(message.chat.id, "❌ Заказ не найден.")
-            return
-        if action == 'refund':
-            update_order_status(order_id, 'cancelled')
-            safe_send(message.chat.id, f"✅ Заказ #{order_id} отменён, деньги возвращены.")
-        elif action == 'penalty':
-            add_rating(order['zakazchik_id'], -1)
-            safe_send(message.chat.id, f"✅ Заказчику #{order['zakazchik_id']} снижен рейтинг.")
-        elif action == 'ban':
-            with db.transaction() as c:
-                c.execute("UPDATE users SET blocked = 1 WHERE id = ?", (order['zakazchik_id'],))
-            safe_send(message.chat.id, f"✅ Заказчик #{order['zakazchik_id']} заблокирован.")
-        else:
-            safe_send(message.chat.id, "❌ Доступно: refund, penalty, ban")
-    except Exception as e:
-        logger.error(f"❌ Ошибка в arbitrate_command: {e}")
         safe_send(message.chat.id, "❌ Ошибка. Попробуйте позже.")
 
 # ===================== CALLBACK =====================
@@ -1664,8 +1602,8 @@ def handle_callbacks(call):
             if not order or order['zakazchik_id'] != user['id']:
                 bot.answer_callback_query(call.id, "❌ Это не ваш заказ", show_alert=True)
                 return
-            if order['status'] not in ['open', 'in_progress', 'ready_to_pay']:
-                bot.answer_callback_query(call.id, "❌ Нельзя отменить", show_alert=True)
+            if order['status'] in ('completed', 'cancelled'):
+                bot.answer_callback_query(call.id, "❌ Этот заказ уже завершён или отменён", show_alert=True)
                 return
             update_order_status(order_id, 'cancelled')
             bot.answer_callback_query(call.id, f"✅ Заказ #{order_id} отменён!", show_alert=True)
@@ -1673,7 +1611,7 @@ def handle_callbacks(call):
             for worker_id in get_workers_for_order(order_id):
                 worker = get_user_by_id(worker_id)
                 if worker:
-                    safe_send(worker['telegram_id'], f"❌ Заказ #{order_id} отменён.")
+                    safe_send(worker['telegram_id'], f"❌ Заказ #{order_id} отменён заказчиком.")
             update_order_status_in_sheet(order_id, 'Cancelled')
 
         elif data.startswith('complete_'):
