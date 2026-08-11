@@ -1,19 +1,3 @@
-"""
-Юрга-Подработка — Telegram-бот для подработок
-Refactored production version.
-
-Сохранены:
-- вся модераторская логика
-- финансовая модель (комиссии, выплаты)
-- Google Sheets интеграция
-- все тексты и UX-флоу
-
-Улучшено:
-- безопасность (нет SQL-инъекций, нет race conditions)
-- архитектура (слои: config → db → service → handler)
-- типизация, валидация, rate limiting, graceful shutdown
-"""
-
 from __future__ import annotations
 
 import json
