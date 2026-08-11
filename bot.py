@@ -505,6 +505,7 @@ class OrderDTO:
     commission: int
     payout_per_person: int
     status: str
+    photo_file_id: Optional[str] = None
     created_at: Optional[str] = None
     paid_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -781,6 +782,8 @@ class MessageRepository:
                 "VALUES (?, ?, ?, ?)",
                 (from_user_id, to_user_id, order_id, text),
             )
+
+
 class SheetsService:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -1663,6 +1666,7 @@ class YurgaBot:
         user = self.users.get_by_telegram(m.from_user.id)
         if not user:
             self.safe.send(m.chat.id, "Пользователь не найден.")
+            self.states.clear(m.from_user.id)
             return
         order = self.orders.create(
             customer=user,
@@ -2304,6 +2308,171 @@ class YurgaBot:
             self.safe.answer_callback(call, "Работники ещё не отправили фото.", True)
             return
         self.orders.update_status(order_id, OrderStatus.WAITING_APPROVAL)
+        self.safe.answer_callback(call, "Заказ ожидает подтверждения!", True)
+        self.safe.edit(
+            f"Заказ #{order_id} выполнен!\nПодтвердите качество:",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=approve_kb(order_id),
+        )
+        self.sheets.update_order_status(order_id, "Waiting approval")
+
+    def _cb_contact_mod(self, call, user: UserDTO, ids: List[int]) -> None:
+        order_id = ids[0]
+        self.states.set(user.telegram_id, "msg_to_mod", {"order_id": order_id})
+        self.safe.answer_callback(call, "Напишите сообщение")
+        self.safe.send(
+            call.message.chat.id,
+            f"Напишите сообщение модератору по заказу #{order_id}:\n"
+            f"(для отмены /cancel)",
+        )
+
+    def _cb_contact_customer_order(self, call, user: UserDTO, ids: List[int]) -> None:
+        order_id = ids[0]
+        order = self.orders.get(order_id)
+        if not order:
+            self.safe.answer_callback(call, "Заказ не найден", True)
+            return
+        self.states.set(user.telegram_id, "msg_to_user",
+                        {"target_id": order.zakazchik_id, "order_id": order_id})
+        self.safe.answer_callback(call, "Напишите сообщение")
+        self.safe.send(
+            call.message.chat.id,
+            f"Напишите сообщение по заказу #{order_id}:\n(для отмены /cancel)",
+        )
+
+    def _cb_contact_worker_order(self, call, user: UserDTO, ids: List[int]) -> None:
+        order_id = ids[0]
+        worker_ids = self.assign.list_user_ids(order_id)
+        if not worker_ids:
+            self.safe.answer_callback(call, "Нет работников", True)
+            return
+        if len(worker_ids) > 1:
+            kb = InlineKeyboardMarkup()
+            for wid in worker_ids:
+                w = self.users.get_by_id(wid)
+                if w:
+                    kb.add(InlineKeyboardButton(
+                        f"{w.name or 'Работник'}",
+                        callback_data=f"send_msg_{wid}_{order_id}"))
+            self.safe.send(call.message.chat.id, "Выберите работника:", reply_markup=kb)
+            self.safe.answer_callback(call)
+        else:
+            self.states.set(user.telegram_id, "msg_to_user",
+                            {"target_id": worker_ids[0], "order_id": order_id})
+            self.safe.answer_callback(call, "Напишите сообщение")
+            self.safe.send(
+                call.message.chat.id,
+                f"Напишите сообщение по заказу #{order_id}:\n(для отмены /cancel)",
+            )
+
+    def _cb_send_msg(self, call, user: UserDTO, ids: List[int]) -> None:
+        target_id = ids[0]
+        order_id = ids[1] if len(ids) > 1 else 0
+        self.states.set(user.telegram_id, "msg_to_user",
+                        {"target_id": target_id, "order_id": order_id})
+        self.safe.answer_callback(call, "Напишите сообщение")
+        self.safe.send(call.message.chat.id, "Напишите сообщение:\n(для отмены /cancel)")
+
+    def _on_photo(self, m) -> None:
+        uid = m.from_user.id
+        state, _ = self.states.get(uid)
+        if not state or not state.startswith("waiting_photo_"):
+            self.safe.send(m.chat.id, "Нет активного запроса на фото.")
+            return
+        try:
+            order_id = int(state.split("_")[2])
+        except (ValueError, IndexError):
+            self.states.clear(uid)
+            return
+        file_id = m.photo[-1].file_id
+        user = self.users.get_by_telegram(uid)
+        if not user:
+            return
+        self.assign.set_photo(order_id, user.id, file_id)
+        self.states.clear(uid)
+        self.safe.send(m.chat.id, f"Фото для заказа #{order_id} сохранено!")
+        order = self.orders.get(order_id)
+        if order and order.status == OrderStatus.WORKING.value \
+                and self.service.are_all_photos(order_id):
+            self.orders.update_status(order_id, OrderStatus.WAITING_APPROVAL)
+            self.safe.send(
+                order.zakazchik_id,
+                f"Все работники отправили фото!\nПодтвердите выполнение:",
+                reply_markup=approve_kb(order_id),
+            )
+            self._notify_moderators(
+                f"Все работники отправили фото по заказу #{order_id}!"
+            )
+
+    def _msg_to_user(self, m, data: Dict) -> None:
+        target_id = data.get("target_id")
+        order_id = data.get("order_id", 0)
+        target = self.users.get_by_id(target_id) if target_id else None
+        if not target:
+            self.safe.send(m.chat.id, "Пользователь не найден.")
+            self.states.clear(m.from_user.id)
+            return
+        order_text = f" по заказу #{order_id}" if order_id else ""
+        self.safe.send(
+            target.telegram_id,
+            f"НОВОЕ СООБЩЕНИЕ{order_text}\n\nОт: {m.from_user.first_name}\n\n{m.text}",
+        )
+        self.messages_repo.save(
+            from_user_id=self.users.get_by_telegram(m.from_user.id).id,
+            to_user_id=target.id,
+            order_id=order_id or None,
+            text=m.text,
+        )
+        self.safe.send(m.chat.id, "Сообщение отправлено!")
+        self.states.clear(m.from_user.id)
+
+    def run(self) -> None:
+        self.logger.info("Бот запущен!")
+        self.logger.info(f"Модераторы: {self.config.moderator_ids}")
+        self.logger.info(f"СБП: {self.config.sbp_phone}")
+
+        def _shutdown(*_):
+            self.logger.info("Получен сигнал завершения")
+            self._running = False
+            self.bot.stop_polling()
+
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+
+        while self._running:
+            try:
+                self.bot.polling(
+                    none_stop=True, interval=1, timeout=60, long_polling_timeout=30
+                )
+            except Exception as e:
+                if not self._running:
+                    break
+                self.logger.warning(f"Polling error: {e}. Рестарт через 5 сек.")
+                time.sleep(5)
+        self.logger.info("Бот остановлен корректно.")
+
+
+def main() -> int:
+    try:
+        config = Config.from_env()
+    except ValueError as e:
+        print(f"\n{e}\n", file=sys.stderr)
+        return 2
+
+    logger = setup_logging(config.log_level)
+    try:
+        app = YurgaBot(config)
+        app.run()
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt")
+    except Exception as e:
+        logger.critical(f"Критическая ошибка: {e}", exc_info=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
         self.safe.answer_callback(call, "Заказ ожидает подтверждения!", True)
         self.safe.edit(
             f"Заказ #{order_id} выполнен!\nПодтвердите качество:",
