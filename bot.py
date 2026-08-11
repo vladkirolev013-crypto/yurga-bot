@@ -1657,15 +1657,13 @@ class YurgaBot:
 
     def _order_people(self, m, data: Dict) -> None:
         n = validate_positive_int(m.text, 50)
-    if n is None:
-        self.safe.send(m.chat.id, "Введите целое число от 1 до 50.")
-        return
-    user = self.users.get_by_telegram(m.from_user.id)
-    if not user:
-        self.safe.send(m.chat.id, "Пользователь не найден.")
-        self.states.clear(m.from_user.id)
-        return
-    try:
+        if n is None:
+            self.safe.send(m.chat.id, "Введите целое число от 1 до 50.")
+            return
+        user = self.users.get_by_telegram(m.from_user.id)
+        if not user:
+            self.safe.send(m.chat.id, "Пользователь не найден.")
+            return
         order = self.orders.create(
             customer=user,
             address=data["address"],
@@ -1675,45 +1673,40 @@ class YurgaBot:
             price_per_hour=self.config.price_per_hour,
             commission_per_hour=self.config.commission_per_hour,
         )
-    except Exception as e:
-        self.logger.error(f"Order create error: {e}", exc_info=True)
-        self.safe.send(m.chat.id, "Ошибка при создании заказа. Попробуйте позже.")
         self.states.clear(m.from_user.id)
-        return
-    self.states.clear(m.from_user.id)
-    self.safe.send(
-        m.chat.id,
-        f"ЗАКАЗ #{order.id} СОЗДАН!\n\n"
-        f"{order.address}\n{order.work_description}\n"
-        f"{order.hours} ч.  {order.people} чел.\n"
-        f"{order.total_sum} руб",
-        reply_markup=customer_kb(),
-    )
-    self.sheets.append_order({
-        "id": order.id,
-        "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "zakazchik_name": order.zakazchik_name,
-        "phone": user.phone or "не указан",
-        "address": order.address,
-        "work_description": order.work_description,
-        "hours": order.hours,
-        "people": order.people,
-        "total_sum": order.total_sum,
-        "commission": order.commission,
-        "payout_per_person": order.payout_per_person,
-        "status": "Open",
-    })
-    self._notify_workers(
-        f"НОВЫЙ ЗАКАЗ!\n#{order.id}\n{order.payout_per_person} руб\n"
-        f"{order.address}\n{order.work_description}\n"
-        f"{order.hours} ч.  {order.people} чел."
-    )
-    self._notify_moderators(
-        f"НОВЫЙ ЗАКАЗ #{order.id}\n\n"
-        f"{order.zakazchik_name}\n{order.address}\n"
-        f"{order.work_description}\n{order.hours} ч.  "
-        f"{order.people} чел.\n{order.total_sum} руб"
-    )
+        self.safe.send(
+            m.chat.id,
+            f"ЗАКАЗ #{order.id} СОЗДАН!\n\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.  {order.people} чел.\n"
+            f"{order.total_sum} руб",
+            reply_markup=customer_kb(),
+        )
+        self.sheets.append_order({
+            "id": order.id,
+            "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
+            "zakazchik_name": order.zakazchik_name,
+            "phone": user.phone or "не указан",
+            "address": order.address,
+            "work_description": order.work_description,
+            "hours": order.hours,
+            "people": order.people,
+            "total_sum": order.total_sum,
+            "commission": order.commission,
+            "payout_per_person": order.payout_per_person,
+            "status": "Open",
+        })
+        self._notify_workers(
+            f"НОВЫЙ ЗАКАЗ!\n#{order.id}\n{order.payout_per_person} руб\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.  {order.people} чел."
+        )
+        self._notify_moderators(
+            f"НОВЫЙ ЗАКАЗ #{order.id}\n\n"
+            f"{order.zakazchik_name}\n{order.address}\n"
+            f"{order.work_description}\n{order.hours} ч.  "
+            f"{order.people} чел.\n{order.total_sum} руб"
+        )
 
     def _customer_complain(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
