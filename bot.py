@@ -1656,7 +1656,7 @@ class YurgaBot:
         self.safe.send(m.chat.id, "Введите количество человек:")
 
     def _order_people(self, m, data: Dict) -> None:
-    n = validate_positive_int(m.text, 50)
+        n = validate_positive_int(m.text, 50)
     if n is None:
         self.safe.send(m.chat.id, "Введите целое число от 1 до 50.")
         return
