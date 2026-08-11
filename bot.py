@@ -1,3 +1,8 @@
+"""
+Юрга-Подработка — Telegram-бот для подработок
+Production version.
+"""
+
 from __future__ import annotations
 
 import json
@@ -34,10 +39,6 @@ except ImportError:
     _GSPREAD_AVAILABLE = False
 
 
-# ============================================================
-# 1. КОНФИГУРАЦИЯ
-# ============================================================
-
 class Role(str, Enum):
     WORKER = "rabotnik"
     CUSTOMER = "zakazchik"
@@ -57,7 +58,6 @@ class OrderStatus(str, Enum):
 
 @dataclass(frozen=True)
 class Config:
-    """Неизменяемая конфигурация из .env"""
     token: str
     moderator_ids: Tuple[int, ...]
     sbp_phone: str
@@ -74,19 +74,19 @@ class Config:
     def from_env(cls) -> "Config":
         token = os.getenv("TOKEN")
         if not token:
-            raise ValueError("❌ TOKEN не задан в окружении!")
+            raise ValueError("TOKEN не задан в окружении!")
 
         mod_raw = os.getenv("MODERATOR_IDS", "8746212340")
         try:
             mod_ids = tuple(int(x.strip()) for x in mod_raw.split(",") if x.strip())
         except ValueError as e:
-            raise ValueError(f"❌ MODERATOR_IDS: {e}") from e
+            raise ValueError(f"MODERATOR_IDS: {e}") from e
 
         try:
             commission = int(os.getenv("COMMISSION_PER_HOUR", "50"))
             price = int(os.getenv("PRICE_PER_HOUR", "500"))
         except ValueError as e:
-            raise ValueError(f"❌ Ошибка в COMMISSION/PRICE: {e}") from e
+            raise ValueError(f"COMMISSION/PRICE: {e}") from e
 
         google_creds = None
         creds_json = os.getenv("GOOGLE_CREDENTIALS")
@@ -94,7 +94,7 @@ class Config:
             try:
                 google_creds = json.loads(creds_json)
             except json.JSONDecodeError as e:
-                logging.getLogger(__name__).warning(f"GOOGLE_CREDENTIALS не JSON: {e}")
+                logging.getLogger(__name__).warning(f"GOOGLE_CREDENTIALS: {e}")
 
         return cls(
             token=token,
@@ -110,10 +110,6 @@ class Config:
         )
 
 
-# ============================================================
-# 2. ЛОГИРОВАНИЕ
-# ============================================================
-
 def setup_logging(level: str) -> logging.Logger:
     logger = logging.getLogger("yurga")
     logger.setLevel(getattr(logging, level, logging.INFO))
@@ -124,7 +120,6 @@ def setup_logging(level: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Файл с ротацией: 5 файлов по 10 МБ
     fh = RotatingFileHandler(
         "bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
@@ -135,7 +130,6 @@ def setup_logging(level: str) -> logging.Logger:
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
-    # Тише стандартные либы
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("oauth2client").setLevel(logging.WARNING)
@@ -143,13 +137,8 @@ def setup_logging(level: str) -> logging.Logger:
     return logger
 
 
-# ============================================================
-# 3. ВАЛИДАТОРЫ
-# ============================================================
-
 _PHONE_RE = re.compile(r"^\+?\d[\d\s\-()]{9,18}$")
 _NAME_RE = re.compile(r"^[А-Яа-яЁёA-Za-z\s\-\.]{2,100}$")
-_INITIALS_RE = re.compile(r"^[А-Яа-яЁёA-Za-z]{2,30}\s+[А-Яа-яЁёA-Za-z]\.\s*[А-Яа-яЁёA-Za-z]\.$")
 
 
 def validate_phone(phone: str) -> bool:
@@ -161,10 +150,8 @@ def validate_name(name: str) -> bool:
 
 
 def validate_initials(initials: str) -> bool:
-    """Принимает 'Иванов И.И.' и похожие форматы"""
     if not initials:
         return False
-    # Делаем проверку мягкой — много форматов встречается
     stripped = initials.strip()
     return 2 <= len(stripped) <= 60
 
@@ -177,13 +164,7 @@ def validate_positive_int(value: Any, max_value: int = 10_000) -> Optional[int]:
     return n if 0 < n <= max_value else None
 
 
-# ============================================================
-# 4. RATE LIMITER (in-memory, простой)
-# ============================================================
-
 class RateLimiter:
-    """Простой in-memory rate limiter. Сбрасывается при рестарте — это ок."""
-
     def __init__(self) -> None:
         self._buckets: Dict[Tuple[int, str], List[float]] = {}
         self._lock = threading.Lock()
@@ -193,7 +174,6 @@ class RateLimiter:
         key = (user_id, action)
         with self._lock:
             bucket = self._buckets.setdefault(key, [])
-            # Чистим старые
             cutoff = now - 60
             bucket[:] = [t for t in bucket if t > cutoff]
             if len(bucket) >= max_per_minute:
@@ -202,11 +182,6 @@ class RateLimiter:
             return True
 
 
-# ============================================================
-# 5. БАЗА ДАННЫХ
-# ============================================================
-
-# Whitelist полей — защита от SQL-инъекций
 USER_UPDATABLE_FIELDS = frozenset({
     "name", "phone", "bank", "initials", "role", "rating", "customer_rating",
     "on_shift", "agreement_accepted", "blocked", "notify",
@@ -214,10 +189,6 @@ USER_UPDATABLE_FIELDS = frozenset({
 
 
 class Database:
-    """Thread-safe обёртка над SQLite.
-    Connection per operation — безопаснее singleton-connection при check_same_thread=False.
-    """
-
     def __init__(self, path: str) -> None:
         self.path = path
         self._init_lock = threading.Lock()
@@ -226,7 +197,6 @@ class Database:
 
     @contextmanager
     def connection(self):
-        """Контекстный менеджер соединения с автокоммитом/откатом."""
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
@@ -246,7 +216,6 @@ class Database:
 
     @contextmanager
     def transaction(self, max_retries: int = 5):
-        """Транзакция с retry при блокировке."""
         for attempt in range(max_retries):
             conn = sqlite3.connect(self.path, timeout=30)
             conn.row_factory = sqlite3.Row
@@ -326,7 +295,7 @@ CREATE TABLE IF NOT EXISTS assignments (
     confirmed INTEGER DEFAULT 0,
     confirmed_at TEXT,
     photo_file_id TEXT,
-    UNIQUE(order_id, user_id)  -- ← защита от race condition
+    UNIQUE(order_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -368,10 +337,6 @@ CREATE INDEX IF NOT EXISTS idx_states_expires ON temp_states(expires_at);
 """
 
 
-# ============================================================
-# 6. РЕПОЗИТОРИИ (чистый DAL)
-# ============================================================
-
 @dataclass
 class UserDTO:
     id: int
@@ -387,6 +352,8 @@ class UserDTO:
     agreement_accepted: int = 0
     blocked: int = 0
     notify: int = 1
+    created_at: Optional[str] = None
+    last_active_at: Optional[str] = None
 
 
 def _row_to_user(row: sqlite3.Row) -> Optional[UserDTO]:
@@ -421,7 +388,6 @@ class UserRepository:
         return [_row_to_user(r) for r in rows if r]
 
     def ensure(self, tg_id: int) -> UserDTO:
-        """Создаёт пользователя, если его нет. Возвращает актуального."""
         with self.db.transaction() as c:
             c.execute(
                 "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)", (tg_id,)
@@ -429,10 +395,9 @@ class UserRepository:
             row = c.execute(
                 "SELECT * FROM users WHERE telegram_id = ?", (tg_id,)
             ).fetchone()
-        return _row_to_user(row)  # type: ignore
+        return _row_to_user(row)
 
     def update_field(self, tg_id: int, field_name: str, value: Any) -> bool:
-        """Безопасное обновление только разрешённых полей."""
         if field_name not in USER_UPDATABLE_FIELDS:
             raise ValueError(f"Поле '{field_name}' не разрешено для обновления")
         with self.db.transaction() as c:
@@ -444,7 +409,6 @@ class UserRepository:
         return True
 
     def update_fields_by_id(self, user_id: int, fields: Dict[str, Any]) -> bool:
-        """Массовое обновление (для регистрации). Все поля проверяются."""
         invalid = set(fields.keys()) - USER_UPDATABLE_FIELDS
         if invalid:
             raise ValueError(f"Недопустимые поля: {invalid}")
@@ -492,7 +456,6 @@ class UserRepository:
         return [_row_to_user(r) for r in rows if r]
 
     def active_workers_for_notify(self) -> List[int]:
-        """Telegram ID активных работников для рассылки."""
         with self.db.connection() as c:
             rows = c.execute(
                 "SELECT telegram_id FROM users "
@@ -526,7 +489,7 @@ class UserRepository:
                     (moderator_id, action, target_user_id, details),
                 )
         except Exception as e:
-            logging.getLogger("yurga").warning(f"Не удалось записать лог модератора: {e}")
+            logging.getLogger("yurga").warning(f"moderator action log: {e}")
 
 
 @dataclass
@@ -630,7 +593,6 @@ class OrderRepository:
         return [OrderDTO(**dict(r)) for r in rows]
 
     def total_payouts(self) -> Tuple[int, int]:
-        """(сумма, количество) всех выплат."""
         with self.db.connection() as c:
             row = c.execute(
                 "SELECT COALESCE(SUM(payout),0), COUNT(*) FROM assignments"
@@ -653,10 +615,8 @@ class AssignmentRepository:
         self.db = db
 
     def take_order(self, order_id: int, user_id: int, payout: int) -> bool:
-        """Атомарное взятие заказа. Возвращает True, если удалось взять."""
         try:
             with self.db.transaction() as c:
-                # Проверяем, что заказ открыт и есть места
                 row = c.execute(
                     "SELECT people FROM orders WHERE id = ? AND status = ?",
                     (order_id, OrderStatus.OPEN.value),
@@ -669,7 +629,6 @@ class AssignmentRepository:
                 ).fetchone()[0]
                 if current >= row[0]:
                     return False
-                # INSERT OR IGNORE защитит от гонки + UNIQUE constraint
                 c.execute(
                     """INSERT OR IGNORE INTO assignments (order_id, user_id, payout)
                        VALUES (?, ?, ?)""",
@@ -762,8 +721,6 @@ class AssignmentRepository:
 
 
 class StateRepository:
-    """Машина состояний с TTL и автоочисткой."""
-
     def __init__(self, db: Database, ttl_minutes: int = 30) -> None:
         self.db = db
         self.ttl = ttl_minutes
@@ -824,15 +781,7 @@ class MessageRepository:
                 "VALUES (?, ?, ?, ?)",
                 (from_user_id, to_user_id, order_id, text),
             )
-
-
-# ============================================================
-# 7. GOOGLE SHEETS (с retry)
-# ============================================================
-
 class SheetsService:
-    """Необязательная интеграция. Если не настроена — молча пропускает."""
-
     def __init__(self, config: Config) -> None:
         self._config = config
         self._sheet = None
@@ -854,7 +803,7 @@ class SheetsService:
             self._sheet = client.open_by_key(self._config.spreadsheet_id)
             return self._sheet
         except Exception as e:
-            self._logger.warning(f"Google Sheets недоступен: {e}")
+            self._logger.warning(f"Google Sheets: {e}")
             self._available = False
             return None
 
@@ -941,13 +890,7 @@ class SheetsService:
         return self._retry(_do)
 
 
-# ============================================================
-# 8. БЕЗОПАСНЫЕ ОТПРАВКИ
-# ============================================================
-
 class SafeBot:
-    """Обёртка над TeleBot, которая не падает на ошибках отправки."""
-
     def __init__(self, bot: telebot.TeleBot) -> None:
         self.bot = bot
         self._logger = logging.getLogger("yurga.bot")
@@ -958,26 +901,24 @@ class SafeBot:
         try:
             return self.bot.send_message(chat_id, text, **kwargs)
         except telebot.apihelper.ApiTelegramException as e:
-            # Пользователь заблокировал бота или удалил аккаунт — не ошибка
             if e.error_code in (403, 400):
                 return None
             self._logger.warning(f"send({chat_id}): {e}")
             return None
         except Exception as e:
-            self._logger.error(f"send({chat_id}) unexpected: {e}")
+            self._logger.error(f"send({chat_id}): {e}")
             return None
 
     def edit(self, text: str, chat_id: int, msg_id: int, **kwargs) -> Any:
         try:
             return self.bot.edit_message_text(text, chat_id, msg_id, **kwargs)
         except telebot.apihelper.ApiTelegramException as e:
-            # Сообщение могло быть уже изменено другим обработчиком
             if "message is not modified" in str(e).lower():
                 return None
             self._logger.warning(f"edit({chat_id}/{msg_id}): {e}")
             return None
         except Exception as e:
-            self._logger.error(f"edit unexpected: {e}")
+            self._logger.error(f"edit: {e}")
             return None
 
     def send_photo(self, chat_id: int, photo: Any, caption: Optional[str] = None, **kwargs) -> Any:
@@ -993,10 +934,6 @@ class SafeBot:
         except Exception as e:
             self._logger.debug(f"answer_callback: {e}")
 
-
-# ============================================================
-# 9. КЛАВИАТУРЫ
-# ============================================================
 
 def main_kb(telegram_id: int, moderator_ids: Iterable[int]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -1097,11 +1034,6 @@ def moderator_payout_kb(order_id: int) -> InlineKeyboardMarkup:
     return kb
 
 
-# ============================================================
-# 10. CALLBACK PARSER (безопасный)
-# ============================================================
-
-# Регулярки для безопасного разбора callback_data
 _CB_PATTERNS = {
     "take":              re.compile(r"^take_(\d+)$"),
     "confirm_place":     re.compile(r"^confirm_place_(\d+)$"),
@@ -1122,7 +1054,6 @@ _CB_PATTERNS = {
 
 
 def parse_callback(data: str) -> Tuple[Optional[str], List[int]]:
-    """Возвращает (action, [ids]) или (None, []) для неизвестных."""
     for action, pattern in _CB_PATTERNS.items():
         m = pattern.match(data)
         if m:
@@ -1130,13 +1061,7 @@ def parse_callback(data: str) -> Tuple[Optional[str], List[int]]:
     return None, []
 
 
-# ============================================================
-# 11. СЕРВИСНЫЙ СЛОЙ (бизнес-логика)
-# ============================================================
-
 class OrderService:
-    """Оркестрирует заказы: создание, взятие, переходы статусов."""
-
     def __init__(self, users: UserRepository, orders: OrderRepository,
                  assignments: AssignmentRepository, sheets: SheetsService,
                  config: Config) -> None:
@@ -1159,13 +1084,7 @@ class OrderService:
         return self.assign.all_have_photos(order_id)
 
 
-# ============================================================
-# 12. ГЛАВНЫЙ КЛАСС БОТА
-# ============================================================
-
 class YurgaBot:
-    """Основной класс приложения."""
-
     def __init__(self, config: Config) -> None:
         self.config = config
         self.logger = logging.getLogger("yurga")
@@ -1188,7 +1107,6 @@ class YurgaBot:
         self._running = True
         self._register_handlers()
 
-    # --- утилиты ---
     def _is_moderator(self, user_id: int) -> bool:
         return user_id in self.config.moderator_ids
 
@@ -1197,24 +1115,23 @@ class YurgaBot:
 
     def _require_not_blocked(self, user: Optional[UserDTO], chat_id: int) -> bool:
         if not user:
-            self.safe.send(chat_id, "❌ Нажмите /start")
+            self.safe.send(chat_id, "Нажмите /start")
             return False
         if user.blocked:
-            self.safe.send(chat_id, "⛔ Ваш аккаунт заблокирован.",
+            self.safe.send(chat_id, "Ваш аккаунт заблокирован.",
                            reply_markup=blocked_kb())
             return False
         return True
 
     def _require_role(self, user: UserDTO, role: Role, chat_id: int) -> bool:
         if user.role != role.value:
-            self.safe.send(chat_id, f"❌ Эта функция доступна только роли '{role.value}'.")
+            self.safe.send(chat_id, f"Эта функция доступна только роли '{role.value}'.")
             return False
         return True
 
     def _require_registered(self, user: UserDTO, chat_id: int) -> bool:
         if not user.agreement_accepted:
-            self.safe.send(chat_id,
-                           "❌ Вы не зарегистрированы. Нажмите '📝 Регистрация'.")
+            self.safe.send(chat_id, "Вы не зарегистрированы. Нажмите 'Регистрация'.")
             return False
         return True
 
@@ -1226,7 +1143,6 @@ class YurgaBot:
         for tg_id in self.users.active_workers_for_notify():
             self.safe.send(tg_id, text)
 
-    # --- регистрация хендлеров ---
     def _register_handlers(self) -> None:
         b = self.bot
 
@@ -1242,7 +1158,6 @@ class YurgaBot:
         @b.message_handler(func=lambda m: m.text == "⬅️ Назад")
         def on_back(m): self._on_back(m)
 
-        # Кнопки работника
         for text, fn in (
             ("📝 Регистрация", self._worker_reg_start),
             ("📋 Свободные заказы", self._worker_free_orders),
@@ -1256,7 +1171,6 @@ class YurgaBot:
             @b.message_handler(func=lambda m, t=text: m.text == t)
             def h(m, _fn=fn): _fn(m)
 
-        # Кнопки заказчика
         for text, fn in (
             ("📝 Создать заказ", self._customer_create_start),
             ("⚠️ Пожаловаться", self._customer_complain),
@@ -1264,11 +1178,9 @@ class YurgaBot:
             @b.message_handler(func=lambda m, t=text: m.text == t)
             def h(m, _fn=fn): _fn(m)
 
-        # Общие кнопки (заказчик/работник)
         @b.message_handler(func=lambda m: m.text == "📞 Связь с модератором")
         def on_blocked_contact(m): self._blocked_contact_mod(m)
 
-        # Модераторские
         mod_texts = ("💰 Выплаты", "🟡 Активные", "✅ Завершённые",
                      "👥 Работники", "🏢 Заказчики", "📊 Статистика",
                      "⭐ Оценить работника", "⭐ Оценить заказчика",
@@ -1277,7 +1189,6 @@ class YurgaBot:
         @b.message_handler(func=lambda m: m.text in mod_texts and self._is_moderator(m.from_user.id))
         def on_mod_cmd(m): self._on_mod_command(m)
 
-        # Фото и свободный текст — последними
         @b.message_handler(content_types=["photo"])
         def on_photo(m): self._on_photo(m)
 
@@ -1287,48 +1198,45 @@ class YurgaBot:
         @b.callback_query_handler(func=lambda c: True)
         def on_callback(c): self._on_callback(c)
 
-    # ---------------------------------------------------------
-    # КОМАНДЫ
-    # ---------------------------------------------------------
     def _on_start(self, m) -> None:
         uid = m.from_user.id
         user = self._get_user_or_none(uid)
         if not user:
             self.users.ensure(uid)
             self.safe.send(m.chat.id,
-                           f"👋 Добро пожаловать в бот {self.config.bot_name}!\n\n"
+                           f"Добро пожаловать в бот {self.config.bot_name}!\n\n"
                            f"Выберите свою роль:",
                            reply_markup=main_kb(uid, self.config.moderator_ids))
             return
         if user.blocked:
-            self.safe.send(m.chat.id, "⛔ Ваш аккаунт заблокирован.",
+            self.safe.send(m.chat.id, "Ваш аккаунт заблокирован.",
                            reply_markup=blocked_kb())
             return
         if user.role == Role.WORKER.value:
-            status = "на смене 🟢" if user.on_shift else "не на смене 🔴"
+            status = "на смене" if user.on_shift else "не на смене"
             notify = "вкл" if user.notify else "выкл"
             self.safe.send(m.chat.id,
-                           f"👷 Меню работника\n\nСтатус: {status}\n"
+                           f"Меню работника\n\nСтатус: {status}\n"
                            f"Уведомления: {notify}",
                            reply_markup=worker_kb())
         elif user.role == Role.CUSTOMER.value:
-            self.safe.send(m.chat.id, "🏢 Меню заказчика",
+            self.safe.send(m.chat.id, "Меню заказчика",
                            reply_markup=customer_kb())
         elif user.role == Role.MODERATOR.value:
-            self.safe.send(m.chat.id, "🛡️ Панель модератора",
+            self.safe.send(m.chat.id, "Панель модератора",
                            reply_markup=moderator_kb())
         else:
-            self.safe.send(m.chat.id, "👋 Выберите роль:",
+            self.safe.send(m.chat.id, "Выберите роль:",
                            reply_markup=main_kb(uid, self.config.moderator_ids))
 
     def _on_cancel(self, m) -> None:
         self.states.clear(m.from_user.id)
-        self.safe.send(m.chat.id, "❌ Действие отменено.",
+        self.safe.send(m.chat.id, "Действие отменено.",
                        reply_markup=main_kb(m.from_user.id, self.config.moderator_ids))
 
     def _on_back(self, m) -> None:
         uid = m.from_user.id
-        self.safe.send(m.chat.id, "📱 Главное меню:\n\nВыберите роль:",
+        self.safe.send(m.chat.id, "Главное меню:\n\nВыберите роль:",
                        reply_markup=main_kb(uid, self.config.moderator_ids))
 
     def _on_role_choice(self, m) -> None:
@@ -1341,39 +1249,36 @@ class YurgaBot:
                    "🛡️ Я модератор": Role.MODERATOR.value}
         new_role = mapping[m.text]
         if new_role == Role.MODERATOR.value and not self._is_moderator(uid):
-            self.safe.send(m.chat.id, "❌ У вас нет прав модератора.")
+            self.safe.send(m.chat.id, "У вас нет прав модератора.")
             return
         self.users.update_field(uid, "role", new_role)
         if new_role == Role.WORKER.value:
-            self.safe.send(m.chat.id, "✅ Вы переключились на роль работника!",
+            self.safe.send(m.chat.id, "Вы переключились на роль работника!",
                            reply_markup=worker_kb())
         elif new_role == Role.CUSTOMER.value:
-            self.safe.send(m.chat.id, "✅ Вы переключились на роль заказчика!",
+            self.safe.send(m.chat.id, "Вы переключились на роль заказчика!",
                            reply_markup=customer_kb())
         else:
-            self.safe.send(m.chat.id, "✅ Вы переключились на панель модератора!",
+            self.safe.send(m.chat.id, "Вы переключились на панель модератора!",
                            reply_markup=moderator_kb())
 
-    # ---------------------------------------------------------
-    # РЕГИСТРАЦИЯ
-    # ---------------------------------------------------------
     def _worker_reg_start(self, m) -> None:
         uid = m.from_user.id
         user = self._get_user_or_none(uid)
         if not self._require_not_blocked(user, m.chat.id):
             return
         if user.agreement_accepted:
-            self.safe.send(m.chat.id, "✅ Вы уже зарегистрированы!")
+            self.safe.send(m.chat.id, "Вы уже зарегистрированы!")
             return
         if user.role not in (Role.WORKER.value, Role.CUSTOMER.value):
-            self.safe.send(m.chat.id, "❌ Сначала выберите роль через главное меню.")
+            self.safe.send(m.chat.id, "Сначала выберите роль через главное меню.")
             return
         self.states.set(uid, "agreement", {"role": user.role})
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.row(KeyboardButton("✅ Принимаю"), KeyboardButton("❌ Отмена"))
         if user.role == Role.WORKER.value:
             text = (
-                "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n"
+                "УСЛОВИЯ СЕРВИСА (ДЛЯ РАБОТНИКОВ)\n\n"
                 "1. Вы берёте заказ только если готовы его выполнить.\n"
                 "2. ОБЯЗАТЕЛЬНО подтвердите, что вы на месте "
                 "(кнопка 'Я на месте').\n"
@@ -1382,30 +1287,29 @@ class YurgaBot:
                 "работу, и вы не получите выплату.\n"
                 "5. Сервис гарантирует выплату после подтверждения заказчиком.\n"
                 "6. Сервис не отвечает за травмы, кражи, качество вашей работы.\n\n"
-                "✅ Принимаете условия?"
+                "Принимаете условия?"
             )
         else:
             text = (
-                "📜 УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)\n\n"
-                "🔹 Вы платите ДО начала работы — деньги замораживаются "
+                "УСЛОВИЯ СЕРВИСА (ДЛЯ ЗАКАЗЧИКОВ)\n\n"
+                "Вы платите ДО начала работы — деньги замораживаются "
                 "на счёте сервиса.\n"
-                "🔹 Это гарантирует, что работники получат оплату "
+                "Это гарантирует, что работники получат оплату "
                 "после выполнения.\n"
-                "🔹 После того как работники подтвердят, что они на месте, "
+                "После того как работники подтвердят, что они на месте, "
                 "вы переводите деньги.\n"
-                "🔹 Если работа выполнена качественно, вы подтверждаете это — "
+                "Если работа выполнена качественно, вы подтверждаете это — "
                 "деньги перечисляются работникам.\n"
-                "🔹 Если работа выполнена плохо или не выполнена — "
+                "Если работа выполнена плохо или не выполнена — "
                 "вы можете отклонить, и мы вернём вам деньги "
                 "(после проверки модератором).\n"
-                "🔹 Сервис защищает и вас, и работников "
+                "Сервис защищает и вас, и работников "
                 "от недобросовестных исполнителей.\n\n"
-                "✅ Принимаете условия?"
+                "Принимаете условия?"
             )
         self.safe.send(m.chat.id, text, reply_markup=kb)
 
     def _on_free_text(self, m) -> None:
-        """Единая точка входа для всего свободного текста (state machine)."""
         uid = m.from_user.id
         if not m.text:
             return
@@ -1451,58 +1355,56 @@ class YurgaBot:
                 self.logger.warning(f"Unknown state '{state}' for user {uid}")
                 self.states.clear(uid)
         except Exception as e:
-            self.logger.exception(f"Ошибка в состоянии '{state}' для {uid}: {e}")
-            self.safe.send(m.chat.id, "❌ Ошибка. Попробуйте позже.")
+            self.logger.exception(f"State '{state}' error for {uid}: {e}")
+            self.safe.send(m.chat.id, "Ошибка. Попробуйте позже.")
             self.states.clear(uid)
 
     def _handle_agreement(self, m, data: Dict) -> None:
         uid = m.from_user.id
         if m.text == "❌ Отмена":
             self.states.clear(uid)
-            self.safe.send(m.chat.id, "❌ Регистрация отменена.",
+            self.safe.send(m.chat.id, "Регистрация отменена.",
                            reply_markup=main_kb(uid, self.config.moderator_ids))
             return
         if m.text != "✅ Принимаю":
-            self.safe.send(m.chat.id, "Нажмите кнопку '✅ Принимаю' или '❌ Отмена'.")
+            self.safe.send(m.chat.id, "Нажмите кнопку 'Принимаю' или 'Отмена'.")
             return
         role = data.get("role")
         self.users.update_field(uid, "agreement_accepted", 1)
         self.states.set(uid, "reg_name", {"role": role})
-        self.safe.send(m.chat.id, "📝 Введите ваше ФИО:")
+        self.safe.send(m.chat.id, "Введите ваше ФИО:")
 
     def _reg_name(self, m, data: Dict) -> None:
         if not validate_name(m.text):
-            self.safe.send(m.chat.id, "❌ Некорректное имя. Используйте буквы, 2-100 символов.")
+            self.safe.send(m.chat.id, "Некорректное имя. Используйте буквы, 2-100 символов.")
             return
         data["name"] = m.text.strip()
         self.states.set(m.from_user.id, "reg_phone", data)
-        self.safe.send(m.chat.id, "📞 Введите номер телефона (+7XXXXXXXXXX):")
+        self.safe.send(m.chat.id, "Введите номер телефона (+7XXXXXXXXXX):")
 
     def _reg_phone(self, m, data: Dict) -> None:
         if not validate_phone(m.text):
-            self.safe.send(m.chat.id,
-                           "❌ Некорректный телефон. Пример: +79991234567")
+            self.safe.send(m.chat.id, "Некорректный телефон. Пример: +79991234567")
             return
         data["phone"] = m.text.strip()
         if data.get("role") == Role.WORKER.value:
             self.states.set(m.from_user.id, "reg_bank", data)
-            self.safe.send(m.chat.id, "💳 Введите номер карты для выплат:")
+            self.safe.send(m.chat.id, "Введите номер карты для выплат:")
         else:
-            # У заказчика только 2 шага
             self._finish_customer_reg(m, data)
 
     def _reg_bank(self, m, data: Dict) -> None:
         bank = m.text.strip()
         if len(bank) < 5 or len(bank) > 50:
-            self.safe.send(m.chat.id, "❌ Некорректные реквизиты.")
+            self.safe.send(m.chat.id, "Некорректные реквизиты.")
             return
         data["bank"] = bank
         self.states.set(m.from_user.id, "reg_initials", data)
-        self.safe.send(m.chat.id, "📝 Введите инициалы (Иванов И.И.):")
+        self.safe.send(m.chat.id, "Введите инициалы (Иванов И.И.):")
 
     def _reg_initials(self, m, data: Dict) -> None:
         if not validate_initials(m.text):
-            self.safe.send(m.chat.id, "❌ Неверный формат. Пример: Иванов И.И.")
+            self.safe.send(m.chat.id, "Неверный формат. Пример: Иванов И.И.")
             return
         data["initials"] = m.text.strip()
         self._finish_worker_reg(m, data)
@@ -1521,10 +1423,10 @@ class YurgaBot:
                 "on_shift": 1,
             })
         except ValueError as e:
-            self.safe.send(m.chat.id, f"❌ Ошибка: {e}")
+            self.safe.send(m.chat.id, f"Ошибка: {e}")
             return
         self.states.clear(uid)
-        self.safe.send(m.chat.id, "✅ Регистрация завершена! Вы на смене 🟢",
+        self.safe.send(m.chat.id, "Регистрация завершена! Вы на смене",
                        reply_markup=worker_kb())
         self.sheets.append_user({
             "telegram_id": uid,
@@ -1545,10 +1447,10 @@ class YurgaBot:
                 "phone": data.get("phone"),
             })
         except ValueError as e:
-            self.safe.send(m.chat.id, f"❌ Ошибка: {e}")
+            self.safe.send(m.chat.id, f"Ошибка: {e}")
             return
         self.states.clear(uid)
-        self.safe.send(m.chat.id, "✅ Регистрация заказчика завершена!",
+        self.safe.send(m.chat.id, "Регистрация заказчика завершена!",
                        reply_markup=customer_kb())
         self.sheets.append_user({
             "telegram_id": uid,
@@ -1558,9 +1460,6 @@ class YurgaBot:
             "registered_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
         })
 
-    # ---------------------------------------------------------
-    # РАБОТНИК
-    # ---------------------------------------------------------
     def _worker_toggle_shift(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
         if not self._require_not_blocked(user, m.chat.id):
@@ -1569,8 +1468,8 @@ class YurgaBot:
             return
         new_val = 0 if user.on_shift else 1
         self.users.update_field(m.from_user.id, "on_shift", new_val)
-        status = "на смене 🟢" if new_val else "не на смене 🔴"
-        self.safe.send(m.chat.id, f"🔄 Статус: {status}", reply_markup=worker_kb())
+        status = "на смене" if new_val else "не на смене"
+        self.safe.send(m.chat.id, f"Статус: {status}", reply_markup=worker_kb())
 
     def _worker_toggle_notify(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
@@ -1581,7 +1480,7 @@ class YurgaBot:
         new_val = 0 if user.notify else 1
         self.users.update_field(m.from_user.id, "notify", new_val)
         status = "включены" if new_val else "выключены"
-        self.safe.send(m.chat.id, f"🔔 Уведомления {status}", reply_markup=worker_kb())
+        self.safe.send(m.chat.id, f"Уведомления {status}", reply_markup=worker_kb())
 
     def _worker_free_orders(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
@@ -1590,17 +1489,17 @@ class YurgaBot:
         if not self._require_registered(user, m.chat.id): return
 
         if not self.limiter.check(m.from_user.id, "free_orders", 15):
-            self.safe.send(m.chat.id, "⏳ Слишком часто. Подождите минуту.")
+            self.safe.send(m.chat.id, "Слишком часто. Подождите минуту.")
             return
 
         rows = self.orders.list_open(20)
         if not rows:
-            self.safe.send(m.chat.id, "📭 Нет свободных заказов.")
+            self.safe.send(m.chat.id, "Нет свободных заказов.")
             return
         for o in rows:
-            text = (f"🆔 Заказ #{o.id}\n💵 {o.payout_per_person} ₽\n"
-                    f"📍 {o.address}\n📝 {o.work_description}\n"
-                    f"⏱ {o.hours} ч.  👥 {o.people} чел.")
+            text = (f"Заказ #{o.id}\n{o.payout_per_person} руб\n"
+                    f"{o.address}\n{o.work_description}\n"
+                    f"{o.hours} ч.  {o.people} чел.")
             self.safe.send(m.chat.id, text,
                            reply_markup=order_inline_kb(o.id, is_customer=False))
 
@@ -1611,58 +1510,58 @@ class YurgaBot:
         if user.role == Role.WORKER.value:
             orders = self.assign.list_worker_orders(user.id)
             if not orders:
-                self.safe.send(m.chat.id, "📭 Нет активных заказов.")
+                self.safe.send(m.chat.id, "Нет активных заказов.")
                 return
             labels = {
-                OrderStatus.OPEN.value: "🟢 Открыт",
-                OrderStatus.READY_TO_PAY.value: "💰 Ожидает оплаты",
-                OrderStatus.PAID.value: "✅ Оплачен",
-                OrderStatus.WORKING.value: "🔧 В работе",
-                OrderStatus.WAITING_APPROVAL.value: "📸 Ждёт подтверждения",
-                OrderStatus.WAITING_PAYOUT.value: "💵 Ждёт выплаты",
-                OrderStatus.COMPLETED.value: "✅ Завершён",
+                OrderStatus.OPEN.value: "Открыт",
+                OrderStatus.READY_TO_PAY.value: "Ожидает оплаты",
+                OrderStatus.PAID.value: "Оплачен",
+                OrderStatus.WORKING.value: "В работе",
+                OrderStatus.WAITING_APPROVAL.value: "Ждёт подтверждения",
+                OrderStatus.WAITING_PAYOUT.value: "Ждёт выплаты",
+                OrderStatus.COMPLETED.value: "Завершён",
             }
             for o in orders:
                 st = labels.get(o["status"], o["status"])
-                text = (f"🆔 Заказ #{o['id']}\n📊 {st}\n💵 {o['payout']} ₽\n"
-                        f"👤 {o['zakazchik_name']}\n📍 {o['address']}\n"
-                        f"📝 {o['work_description']}")
+                text = (f"Заказ #{o['id']}\n{st}\n{o['payout']} руб\n"
+                        f"{o['zakazchik_name']}\n{o['address']}\n"
+                        f"{o['work_description']}")
                 kb = InlineKeyboardMarkup()
                 kb.add(InlineKeyboardButton(
-                    "📞 Написать заказчику",
+                    "Написать заказчику",
                     callback_data=f"contact_customer_order_{o['id']}"))
                 self.safe.send(m.chat.id, text, reply_markup=kb)
         elif user.role == Role.CUSTOMER.value:
             orders = self.orders.list_by_customer(user.id, 100)
             if not orders:
-                self.safe.send(m.chat.id, "📭 У вас нет заказов.")
+                self.safe.send(m.chat.id, "У вас нет заказов.")
                 return
             labels = {
-                OrderStatus.OPEN.value: "🟢 Открыт",
-                OrderStatus.READY_TO_PAY.value: "💰 Ожидает оплаты",
-                OrderStatus.PAID.value: "✅ Оплачен",
-                OrderStatus.WORKING.value: "🔧 В работе",
-                OrderStatus.WAITING_APPROVAL.value: "📸 Ждёт подтверждения",
-                OrderStatus.WAITING_PAYOUT.value: "💵 Ждёт выплаты",
-                OrderStatus.COMPLETED.value: "✅ Завершён",
-                OrderStatus.CANCELLED.value: "❌ Отменён",
+                OrderStatus.OPEN.value: "Открыт",
+                OrderStatus.READY_TO_PAY.value: "Ожидает оплаты",
+                OrderStatus.PAID.value: "Оплачен",
+                OrderStatus.WORKING.value: "В работе",
+                OrderStatus.WAITING_APPROVAL.value: "Ждёт подтверждения",
+                OrderStatus.WAITING_PAYOUT.value: "Ждёт выплаты",
+                OrderStatus.COMPLETED.value: "Завершён",
+                OrderStatus.CANCELLED.value: "Отменён",
             }
             for o in orders:
                 st = labels.get(o.status, o.status)
-                text = (f"🆔 Заказ #{o.id}\n💰 {o.total_sum} ₽\n📊 {st}\n"
-                        f"📍 {o.address}\n📝 {o.work_description}")
+                text = (f"Заказ #{o.id}\n{o.total_sum} руб\n{st}\n"
+                        f"{o.address}\n{o.work_description}")
                 kb = InlineKeyboardMarkup()
                 worker_ids = self.assign.list_user_ids(o.id)
                 if worker_ids:
                     kb.add(InlineKeyboardButton(
-                        "📞 Написать работнику",
+                        "Написать работнику",
                         callback_data=f"contact_worker_order_{o.id}"))
                 if o.status not in (OrderStatus.COMPLETED.value, OrderStatus.CANCELLED.value):
                     kb.add(InlineKeyboardButton(
-                        "❌ Отменить заказ", callback_data=f"cancel_{o.id}"))
+                        "Отменить заказ", callback_data=f"cancel_{o.id}"))
                 self.safe.send(m.chat.id, text, reply_markup=kb)
         else:
-            self.safe.send(m.chat.id, "❌ Неизвестная роль.")
+            self.safe.send(m.chat.id, "Неизвестная роль.")
 
     def _worker_my_payouts(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
@@ -1670,21 +1569,21 @@ class YurgaBot:
         if not self._require_role(user, Role.WORKER, m.chat.id): return
         total, count = self.assign.total_for_user(user.id)
         self.safe.send(m.chat.id,
-                       f"💰 ВАШИ ВЫПЛАТЫ\n\n💵 Всего: {total} ₽\n👥 Заказов: {count}")
+                       f"ВАШИ ВЫПЛАТЫ\n\nВсего: {total} руб\nЗаказов: {count}")
 
     def _profile(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
         if not user:
             return
         if user.blocked:
-            self.safe.send(m.chat.id, "⛔ Вы заблокированы.", reply_markup=blocked_kb())
+            self.safe.send(m.chat.id, "Вы заблокированы.", reply_markup=blocked_kb())
             return
-        labels = {Role.WORKER.value: "👷 Работник",
-                  Role.CUSTOMER.value: "🏢 Заказчик",
-                  Role.MODERATOR.value: "🛡️ Модератор"}
+        labels = {Role.WORKER.value: "Работник",
+                  Role.CUSTOMER.value: "Заказчик",
+                  Role.MODERATOR.value: "Модератор"}
         rating = user.rating if user.role == Role.WORKER.value else user.customer_rating
         text = (
-            f"👤 ПРОФИЛЬ\n\n"
+            f"ПРОФИЛЬ\n\n"
             f"Имя: {user.name or 'не указано'}\n"
             f"Телефон: {user.phone or 'не указан'}\n"
             f"Роль: {labels.get(user.role, user.role or '—')}\n"
@@ -1696,21 +1595,20 @@ class YurgaBot:
         user = self._get_user_or_none(m.from_user.id)
         if not self._require_not_blocked(user, m.chat.id): return
         if user.role not in (Role.WORKER.value, Role.CUSTOMER.value):
-            self.safe.send(m.chat.id, "❌ Функция недоступна.")
+            self.safe.send(m.chat.id, "Функция недоступна.")
             return
         self.states.set(m.from_user.id, "msg_to_mod", {})
-        self.safe.send(m.chat.id, "📝 Напишите сообщение модератору:\n"
-                                  "(для отмены /cancel)")
+        self.safe.send(m.chat.id, "Напишите сообщение модератору:\n(для отмены /cancel)")
 
     def _msg_to_mod(self, m, data: Dict) -> None:
         user = self.users.get_by_telegram(m.from_user.id)
-        text = (f"📩 СООБЩЕНИЕ ОТ {user.role if user else '?'}\n\n"
+        text = (f"СООБЩЕНИЕ ОТ {user.role if user else '?'}\n\n"
                 f"От: {user.name if user and user.name else 'без имени'} "
                 f"(ID {user.id if user else m.from_user.id})\n"
                 f"Телефон: {user.phone if user and user.phone else 'не указан'}\n\n"
                 f"{m.text}")
         self._notify_moderators(text)
-        self.safe.send(m.chat.id, "✅ Сообщение отправлено модератору.",
+        self.safe.send(m.chat.id, "Сообщение отправлено модератору.",
                        reply_markup=main_kb(m.from_user.id, self.config.moderator_ids))
         self.states.clear(m.from_user.id)
 
@@ -1719,55 +1617,52 @@ class YurgaBot:
         if not user or not user.blocked:
             return
         self._notify_moderators(
-            f"📞 Пользователь {m.from_user.id} "
+            f"Пользователь {m.from_user.id} "
             f"({user.name or 'без имени'}) просит связи."
         )
-        self.safe.send(m.chat.id, "✅ Запрос отправлен модератору.")
+        self.safe.send(m.chat.id, "Запрос отправлен модератору.")
 
-    # ---------------------------------------------------------
-    # ЗАКАЗЧИК
-    # ---------------------------------------------------------
     def _customer_create_start(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
         if not self._require_not_blocked(user, m.chat.id): return
         if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
         if not self._require_registered(user, m.chat.id): return
         self.states.set(m.from_user.id, "order_address", {})
-        self.safe.send(m.chat.id, "📍 Введите адрес выполнения работы:")
+        self.safe.send(m.chat.id, "Введите адрес выполнения работы:")
 
     def _order_address(self, m, data: Dict) -> None:
         if not m.text or len(m.text.strip()) < 5:
-            self.safe.send(m.chat.id, "❌ Слишком короткий адрес.")
+            self.safe.send(m.chat.id, "Слишком короткий адрес.")
             return
         data["address"] = m.text.strip()
         self.states.set(m.from_user.id, "order_description", data)
-        self.safe.send(m.chat.id, "📝 Введите описание работы (что нужно сделать):")
+        self.safe.send(m.chat.id, "Введите описание работы (что нужно сделать):")
 
     def _order_description(self, m, data: Dict) -> None:
         if not m.text or len(m.text.strip()) < 3:
-            self.safe.send(m.chat.id, "❌ Слишком короткое описание.")
+            self.safe.send(m.chat.id, "Слишком короткое описание.")
             return
         data["work_description"] = m.text.strip()
         self.states.set(m.from_user.id, "order_hours", data)
-        self.safe.send(m.chat.id, "⏱ Введите количество часов (число):")
+        self.safe.send(m.chat.id, "Введите количество часов (число):")
 
     def _order_hours(self, m, data: Dict) -> None:
         n = validate_positive_int(m.text, 24)
         if n is None:
-            self.safe.send(m.chat.id, "❌ Введите целое число от 1 до 24.")
+            self.safe.send(m.chat.id, "Введите целое число от 1 до 24.")
             return
         data["hours"] = n
         self.states.set(m.from_user.id, "order_people", data)
-        self.safe.send(m.chat.id, "👥 Введите количество человек:")
+        self.safe.send(m.chat.id, "Введите количество человек:")
 
     def _order_people(self, m, data: Dict) -> None:
         n = validate_positive_int(m.text, 50)
         if n is None:
-            self.safe.send(m.chat.id, "❌ Введите целое число от 1 до 50.")
+            self.safe.send(m.chat.id, "Введите целое число от 1 до 50.")
             return
         user = self.users.get_by_telegram(m.from_user.id)
         if not user:
-            self.safe.send(m.chat.id, "❌ Пользователь не найден.")
+            self.safe.send(m.chat.id, "Пользователь не найден.")
             return
         order = self.orders.create(
             customer=user,
@@ -1781,10 +1676,10 @@ class YurgaBot:
         self.states.clear(m.from_user.id)
         self.safe.send(
             m.chat.id,
-            f"✅ ЗАКАЗ #{order.id} СОЗДАН!\n\n"
-            f"📍 {order.address}\n📝 {order.work_description}\n"
-            f"⏱ {order.hours} ч.  👥 {order.people} чел.\n"
-            f"💰 {order.total_sum} ₽",
+            f"ЗАКАЗ #{order.id} СОЗДАН!\n\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.  {order.people} чел.\n"
+            f"{order.total_sum} руб",
             reply_markup=customer_kb(),
         )
         self.sheets.append_order({
@@ -1802,28 +1697,24 @@ class YurgaBot:
             "status": "Open",
         })
         self._notify_workers(
-            f"🔔 НОВЫЙ ЗАКАЗ!\n🆔 #{order.id}\n💵 {order.payout_per_person} ₽\n"
-            f"📍 {order.address}\n📝 {order.work_description}\n"
-            f"⏱ {order.hours} ч.  👥 {order.people} чел."
+            f"НОВЫЙ ЗАКАЗ!\n#{order.id}\n{order.payout_per_person} руб\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.  {order.people} чел."
         )
         self._notify_moderators(
-            f"📊 НОВЫЙ ЗАКАЗ #{order.id}\n\n"
-            f"👤 {order.zakazchik_name}\n📍 {order.address}\n"
-            f"📝 {order.work_description}\n⏱ {order.hours} ч.  "
-            f"👥 {order.people} чел.\n💰 {order.total_sum} ₽"
+            f"НОВЫЙ ЗАКАЗ #{order.id}\n\n"
+            f"{order.zakazchik_name}\n{order.address}\n"
+            f"{order.work_description}\n{order.hours} ч.  "
+            f"{order.people} чел.\n{order.total_sum} руб"
         )
 
     def _customer_complain(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
         if not self._require_not_blocked(user, m.chat.id): return
         if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
-        # Используем то же состояние msg_to_mod — модераторы увидят как жалобу
         self.states.set(m.from_user.id, "msg_to_mod", {"complaint": True})
-        self.safe.send(m.chat.id, "📝 Опишите жалобу:\n(для отмены /cancel)")
+        self.safe.send(m.chat.id, "Опишите жалобу:\n(для отмены /cancel)")
 
-    # ---------------------------------------------------------
-    # МОДЕРАТОР
-    # ---------------------------------------------------------
     def _on_mod_command(self, m) -> None:
         uid = m.from_user.id
         text = m.text
@@ -1831,64 +1722,65 @@ class YurgaBot:
             if text == "💰 Выплаты":
                 total, count = self.orders.total_payouts()
                 self.safe.send(m.chat.id,
-                               f"💰 ВСЕГО ВЫПЛАЧЕНО\n\n💵 {total} ₽\n👥 {count} выплат")
+                               f"ВСЕГО ВЫПЛАЧЕНО\n\n{total} руб\n{count} выплат")
             elif text == "🟡 Активные":
                 orders = self.orders.list_active(10)
                 if not orders:
-                    self.safe.send(m.chat.id, "🟡 Нет активных заказов.")
+                    self.safe.send(m.chat.id, "Нет активных заказов.")
                     return
                 for o in orders:
                     self.safe.send(
                         m.chat.id,
-                        f"🆔 Заказ #{o.id}\n👤 {o.zakazchik_name}\n"
-                        f"📍 {o.address}\n📝 {o.work_description}\n"
-                        f"📊 {o.status}\n💰 {o.total_sum} ₽",
+                        f"Заказ #{o.id}\n{o.zakazchik_name}\n"
+                        f"{o.address}\n{o.work_description}\n"
+                        f"{o.status}\n{o.total_sum} руб",
                     )
             elif text == "✅ Завершённые":
                 orders = self.orders.list_completed(20)
                 if not orders:
-                    self.safe.send(m.chat.id, "✅ Нет завершённых заказов.")
+                    self.safe.send(m.chat.id, "Нет завершённых заказов.")
                     return
                 for o in orders:
                     self.safe.send(
                         m.chat.id,
-                        f"✅ Заказ #{o.id}\n👤 {o.zakazchik_name}\n"
-                        f"📍 {o.address}\n📝 {o.work_description}\n"
-                        f"💰 {o.total_sum} ₽",
+                        f"Заказ #{o.id}\n{o.zakazchik_name}\n"
+                        f"{o.address}\n{o.work_description}\n"
+                        f"{o.total_sum} руб",
                     )
             elif text == "👥 Работники":
                 workers = self.users.list_workers(20)
                 if not workers:
-                    self.safe.send(m.chat.id, "👥 Нет работников.")
+                    self.safe.send(m.chat.id, "Нет работников.")
                     return
-                msg = "👥 РАБОТНИКИ:\n\n"
+                msg = "РАБОТНИКИ:\n\n"
                 for w in workers:
-                    s = "🟢" if w.on_shift else "🔴"
-                    b = "🔒" if w.blocked else "✅"
-                    n = "🔔" if w.notify else "🔕"
-                    msg += (f"{s} {b} {n} ID {w.id}: {w.name}\n"
-                            f"📞 {w.phone}, ⭐ {w.rating}\n")
+                    s = "на смене" if w.on_shift else "не на смене"
+                    b = "заблокирован" if w.blocked else "активен"
+                    msg += (f"ID {w.id}: {w.name}\n"
+                            f"{w.phone}, рейтинг {w.rating}\n"
+                            f"{s}, {b}\n")
                 self.safe.send(m.chat.id, msg)
             elif text == "🏢 Заказчики":
                 customers = self.users.list_customers(20)
                 if not customers:
-                    self.safe.send(m.chat.id, "🏢 Нет заказчиков.")
+                    self.safe.send(m.chat.id, "Нет заказчиков.")
                     return
-                msg = "🏢 ЗАКАЗЧИКИ:\n\n"
+                msg = "ЗАКАЗЧИКИ:\n\n"
                 for c in customers:
-                    b = "🔒" if c.blocked else "✅"
-                    msg += (f"{b} ID {c.id}: {c.name}\n"
-                            f"📞 {c.phone}, ⭐ {c.customer_rating}\n")
+                    b = "заблокирован" if c.blocked else "активен"
+                    msg += (f"ID {c.id}: {c.name}\n"
+                            f"{c.phone}, рейтинг {c.customer_rating}\n"
+                            f"{b}\n")
                 self.safe.send(m.chat.id, msg)
             elif text == "📊 Статистика":
                 stats = self.users.count()
                 self.safe.send(
                     m.chat.id,
-                    f"📊 СТАТИСТИКА\n\n"
-                    f"👥 Всего: {stats['total']}\n"
-                    f"👷 Работников: {stats['workers']}\n"
-                    f"🏢 Заказчиков: {stats['customers']}\n"
-                    f"📦 Заказов: {stats['orders']}",
+                    f"СТАТИСТИКА\n\n"
+                    f"Всего: {stats['total']}\n"
+                    f"Работников: {stats['workers']}\n"
+                    f"Заказчиков: {stats['customers']}\n"
+                    f"Заказов: {stats['orders']}",
                 )
             elif text == "⭐ Оценить работника":
                 self.states.set(uid, "mod_rate_worker", {"awaiting_id": True})
@@ -1901,97 +1793,96 @@ class YurgaBot:
                 kb.row(KeyboardButton("По ID"), KeyboardButton("По телефону"))
                 kb.row(KeyboardButton("⬅️ Назад"))
                 self.states.set(uid, "mod_block_method", {})
-                self.safe.send(m.chat.id, "🔒 Выберите способ:", reply_markup=kb)
+                self.safe.send(m.chat.id, "Выберите способ:", reply_markup=kb)
             elif text == "🔓 Разблокировка":
                 self.states.set(uid, "mod_unblock_by_id", {})
                 self.safe.send(m.chat.id, "Введите ID пользователя:")
         except Exception as e:
             self.logger.exception(f"mod cmd '{text}': {e}")
-            self.safe.send(m.chat.id, "❌ Ошибка.")
+            self.safe.send(m.chat.id, "Ошибка.")
 
     def _mod_rate_worker_apply(self, m, data: Dict) -> None:
         if data.get("awaiting_id"):
             n = validate_positive_int(m.text, 1_000_000)
             if not n:
-                self.safe.send(m.chat.id, "❌ Введите число.",
+                self.safe.send(m.chat.id, "Введите число.",
                                reply_markup=moderator_kb())
                 self.states.clear(m.from_user.id)
                 return
             u = self.users.get_by_id(n)
             if not u or u.role != Role.WORKER.value:
-                self.safe.send(m.chat.id, "❌ Работник не найден.",
+                self.safe.send(m.chat.id, "Работник не найден.",
                                reply_markup=moderator_kb())
                 self.states.clear(m.from_user.id)
                 return
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
-            kb.row(KeyboardButton("➕ +1"), KeyboardButton("➖ -1"), KeyboardButton("⏺ 0"))
+            kb.row(KeyboardButton("+1"), KeyboardButton("-1"), KeyboardButton("0"))
             kb.row(KeyboardButton("⬅️ Назад"))
             self.states.set(m.from_user.id, "mod_rate_worker", {"user_id": u.id})
-            self.safe.send(m.chat.id, f"⭐ {u.name} (рейтинг: {u.rating})",
+            self.safe.send(m.chat.id, f"{u.name} (рейтинг: {u.rating})",
                            reply_markup=kb)
             return
-        if m.text not in ("➕ +1", "➖ -1", "⏺ 0"):
+        if m.text not in ("+1", "-1", "0"):
             if m.text == "⬅️ Назад":
                 self.states.clear(m.from_user.id)
-                self.safe.send(m.chat.id, "🛡️ Панель модератора:",
+                self.safe.send(m.chat.id, "Панель модератора:",
                                reply_markup=moderator_kb())
             else:
-                self.safe.send(m.chat.id, "❌ Нажмите кнопку.")
+                self.safe.send(m.chat.id, "Нажмите кнопку.")
             return
-        delta = {"➕ +1": 1, "➖ -1": -1, "⏺ 0": 0}[m.text]
+        delta = {"+1": 1, "-1": -1, "0": 0}[m.text]
         user_id = data.get("user_id")
         new_rating = self.users.change_rating(user_id, delta)
         self.users.log_moderator_action(
             m.from_user.id, "rate_worker", user_id, f"delta={delta}"
         )
         self.states.clear(m.from_user.id)
-        self.safe.send(m.chat.id, f"✅ Рейтинг: {new_rating}",
+        self.safe.send(m.chat.id, f"Рейтинг: {new_rating}",
                        reply_markup=moderator_kb())
 
     def _mod_rate_customer_apply(self, m, data: Dict) -> None:
         if data.get("awaiting_id"):
             n = validate_positive_int(m.text, 1_000_000)
             if not n:
-                self.safe.send(m.chat.id, "❌ Введите число.",
+                self.safe.send(m.chat.id, "Введите число.",
                                reply_markup=moderator_kb())
                 self.states.clear(m.from_user.id)
                 return
             u = self.users.get_by_id(n)
             if not u or u.role != Role.CUSTOMER.value:
-                self.safe.send(m.chat.id, "❌ Заказчик не найден.",
+                self.safe.send(m.chat.id, "Заказчик не найден.",
                                reply_markup=moderator_kb())
                 self.states.clear(m.from_user.id)
                 return
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
-            kb.row(KeyboardButton("➕ +1"), KeyboardButton("➖ -1"), KeyboardButton("⏺ 0"))
+            kb.row(KeyboardButton("+1"), KeyboardButton("-1"), KeyboardButton("0"))
             kb.row(KeyboardButton("⬅️ Назад"))
             self.states.set(m.from_user.id, "mod_rate_customer", {"user_id": u.id})
-            self.safe.send(m.chat.id,
-                           f"⭐ {u.name} (рейтинг: {u.customer_rating})",
+            self.safe.send(m.chat.id, f"{u.name} (рейтинг: {u.customer_rating})",
                            reply_markup=kb)
             return
-        if m.text not in ("➕ +1", "➖ -1", "⏺ 0"):
+        if m.text not in ("+1", "-1", "0"):
             if m.text == "⬅️ Назад":
                 self.states.clear(m.from_user.id)
-                self.safe.send(m.chat.id, "🛡️ Панель модератора:",
+                self.safe.send(m.chat.id, "Панель модератора:",
                                reply_markup=moderator_kb())
             else:
-                self.safe.send(m.chat.id, "❌ Нажмите кнопку.")
+                self.safe.send(m.chat.id, "Нажмите кнопку.")
             return
-        delta = {"➕ +1": 1, "➖ -1": -1, "⏺ 0": 0}[m.text]
+        delta = {"+1": 1, "-1": -1, "0": 0}[m.text]
         user_id = data.get("user_id")
         new_rating = self.users.change_customer_rating(user_id, delta)
         self.users.log_moderator_action(
             m.from_user.id, "rate_customer", user_id, f"delta={delta}"
         )
         self.states.clear(m.from_user.id)
-        self.safe.send(m.chat.id, f"✅ Рейтинг заказчика: {new_rating}",
+        self.safe.send(m.chat.id, f"Рейтинг заказчика: {new_rating}",
                        reply_markup=moderator_kb())
 
     def _mod_block_choose_method(self, m, data: Dict) -> None:
         if m.text == "⬅️ Назад":
             self.states.clear(m.from_user.id)
-            self.safe.send(m.chat.id, "🛡️ Панель модератора:",
+            self.safe.send(m.chat.id, "Панель модератора:",
                            reply_markup=moderator_kb())
             return
         if m.text == "По ID":
@@ -2001,38 +1892,38 @@ class YurgaBot:
             self.states.set(m.from_user.id, "mod_block_by_phone", {})
             self.safe.send(m.chat.id, "Введите номер телефона:")
         else:
-            self.safe.send(m.chat.id, "❌ Нажмите кнопку.")
+            self.safe.send(m.chat.id, "Нажмите кнопку.")
 
     def _mod_block_by_id(self, m) -> None:
         n = validate_positive_int(m.text, 1_000_000)
         if not n:
-            self.safe.send(m.chat.id, "❌ Введите число.",
+            self.safe.send(m.chat.id, "Введите число.",
                            reply_markup=moderator_kb())
             self.states.clear(m.from_user.id)
             return
         u = self.users.get_by_id(n)
         if not u:
-            self.safe.send(m.chat.id, "❌ Пользователь не найден.",
+            self.safe.send(m.chat.id, "Пользователь не найден.",
                            reply_markup=moderator_kb())
             self.states.clear(m.from_user.id)
             return
         self.users.update_fields_by_id(u.id, {"blocked": 1})
         self.users.log_moderator_action(m.from_user.id, "block", u.id, "by_id")
         self.states.clear(m.from_user.id)
-        self.safe.send(m.chat.id, f"✅ {u.name} заблокирован.",
+        self.safe.send(m.chat.id, f"{u.name} заблокирован.",
                        reply_markup=moderator_kb())
-        self.safe.send(u.telegram_id, "⛔ Вы заблокированы.")
+        self.safe.send(u.telegram_id, "Вы заблокированы.")
 
     def _mod_block_by_phone(self, m) -> None:
         phone = m.text.strip() if m.text else ""
         if not validate_phone(phone):
-            self.safe.send(m.chat.id, "❌ Некорректный телефон.",
+            self.safe.send(m.chat.id, "Некорректный телефон.",
                            reply_markup=moderator_kb())
             self.states.clear(m.from_user.id)
             return
         users = self.users.get_by_phone(phone)
         if not users:
-            self.safe.send(m.chat.id, "❌ Пользователь не найден.",
+            self.safe.send(m.chat.id, "Пользователь не найден.",
                            reply_markup=moderator_kb())
             self.states.clear(m.from_user.id)
             return
@@ -2041,50 +1932,47 @@ class YurgaBot:
             self.users.log_moderator_action(
                 m.from_user.id, "block", u.id, f"by_phone={phone}"
             )
-            self.safe.send(u.telegram_id, "⛔ Вы заблокированы.")
+            self.safe.send(u.telegram_id, "Вы заблокированы.")
         self.states.clear(m.from_user.id)
-        self.safe.send(m.chat.id, f"✅ Заблокировано: {len(users)}.",
+        self.safe.send(m.chat.id, f"Заблокировано: {len(users)}.",
                        reply_markup=moderator_kb())
 
     def _mod_unblock_by_id(self, m) -> None:
         n = validate_positive_int(m.text, 1_000_000)
         if not n:
-            self.safe.send(m.chat.id, "❌ Введите число.",
+            self.safe.send(m.chat.id, "Введите число.",
                            reply_markup=moderator_kb())
             self.states.clear(m.from_user.id)
             return
         u = self.users.get_by_id(n)
         if not u or not u.blocked:
-            self.safe.send(m.chat.id, "❌ Заблокированный пользователь не найден.",
+            self.safe.send(m.chat.id, "Заблокированный пользователь не найден.",
                            reply_markup=moderator_kb())
             self.states.clear(m.from_user.id)
             return
         self.users.update_fields_by_id(u.id, {"blocked": 0})
         self.users.log_moderator_action(m.from_user.id, "unblock", u.id, "")
         self.states.clear(m.from_user.id)
-        self.safe.send(m.chat.id, f"✅ {u.name} разблокирован.",
+        self.safe.send(m.chat.id, f"{u.name} разблокирован.",
                        reply_markup=moderator_kb())
-        self.safe.send(u.telegram_id, "✅ Вы разблокированы.")
+        self.safe.send(u.telegram_id, "Вы разблокированы.")
 
-    # ---------------------------------------------------------
-    # CALLBACKS
-    # ---------------------------------------------------------
     def _on_callback(self, call) -> None:
         try:
             if not call.message:
-                self.safe.answer_callback(call, "⏳ Сообщение устарело", True)
+                self.safe.answer_callback(call, "Сообщение устарело", True)
                 return
             user = self._get_user_or_none(call.from_user.id)
             if not user or user.blocked:
-                self.safe.answer_callback(call, "⛔ Доступ запрещён", True)
+                self.safe.answer_callback(call, "Доступ запрещён", True)
                 return
             if not self.limiter.check(call.from_user.id, "callback", 40):
-                self.safe.answer_callback(call, "⏳ Слишком часто", True)
+                self.safe.answer_callback(call, "Слишком часто", True)
                 return
 
             action, ids = parse_callback(call.data)
             if not action:
-                self.safe.answer_callback(call, "❌ Неизвестная команда", True)
+                self.safe.answer_callback(call, "Неизвестная команда", True)
                 return
 
             handler = {
@@ -2107,42 +1995,39 @@ class YurgaBot:
             if handler:
                 handler(call, user, ids)
             else:
-                self.safe.answer_callback(call, "❌ Неизвестная команда", True)
+                self.safe.answer_callback(call, "Неизвестная команда", True)
         except Exception as e:
             self.logger.exception(f"callback error: {e}")
             try:
-                self.safe.answer_callback(call, "❌ Ошибка", True)
+                self.safe.answer_callback(call, "Ошибка", True)
             except Exception:
                 pass
 
-    # --- обработчики callback ---
     def _cb_take(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.OPEN.value:
-            self.safe.answer_callback(call, "❌ Заказ уже не доступен", True)
+            self.safe.answer_callback(call, "Заказ уже не доступен", True)
             return
         if user.role != Role.WORKER.value:
-            self.safe.answer_callback(call, "❌ Только для работников", True)
+            self.safe.answer_callback(call, "Только для работников", True)
             return
         if not user.agreement_accepted:
-            self.safe.answer_callback(
-                call, "❌ Пройдите регистрацию в меню работника.", True)
+            self.safe.answer_callback(call, "Пройдите регистрацию", True)
             return
         ok = self.assign.take_order(order_id, user.id, order.payout_per_person)
         if not ok:
-            self.safe.answer_callback(call, "❌ Не удалось взять заказ", True)
+            self.safe.answer_callback(call, "Не удалось взять заказ", True)
             return
         if self.service.is_fully_staffed(order_id):
             self.orders.update_status(order_id, OrderStatus.READY_TO_PAY)
-            self.safe.answer_callback(
-                call, f"✅ Заказ #{order_id} укомплектован!", True)
+            self.safe.answer_callback(call, f"Заказ #{order_id} укомплектован!", True)
             self.safe.send(
                 order.zakazchik_id,
-                f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
-                f"👥 Все работники собраны.\n📍 {order.address}\n"
-                f"📝 {order.work_description}\n💰 {order.total_sum} ₽\n"
-                f"💳 Переведите по СБП: {self.config.sbp_phone}",
+                f"ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                f"Все работники собраны.\n{order.address}\n"
+                f"{order.work_description}\n{order.total_sum} руб\n"
+                f"Переведите по СБП: {self.config.sbp_phone}",
                 reply_markup=payment_kb(order_id),
             )
             for wid in self.assign.list_user_ids(order_id):
@@ -2150,21 +2035,20 @@ class YurgaBot:
                 if w:
                     self.safe.send(
                         w.telegram_id,
-                        f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
-                        f"📍 {order.address}\n📝 {order.work_description}\n"
-                        f"💰 {order.payout_per_person} ₽",
+                        f"ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
+                        f"{order.address}\n{order.work_description}\n"
+                        f"{order.payout_per_person} руб",
                     )
             self._notify_moderators(
-                f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
-                f"👤 {order.zakazchik_name}\n📍 {order.address}\n"
-                f"📝 {order.work_description}\n👥 {order.people} чел.\n"
-                f"💰 {order.total_sum} ₽"
+                f"ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
+                f"{order.zakazchik_name}\n{order.address}\n"
+                f"{order.work_description}\n{order.people} чел.\n"
+                f"{order.total_sum} руб"
             )
         else:
-            self.safe.answer_callback(
-                call, f"✅ Вы взяли заказ #{order_id}!", True)
+            self.safe.answer_callback(call, f"Вы взяли заказ #{order_id}!", True)
         self.safe.edit(
-            f"✅ Вы взяли заказ #{order_id}!\n📍 Подтвердите, что вы на месте.",
+            f"Вы взяли заказ #{order_id}!\nПодтвердите, что вы на месте.",
             call.message.chat.id, call.message.message_id,
             reply_markup=confirm_take_kb(order_id),
         )
@@ -2175,25 +2059,24 @@ class YurgaBot:
         if not order or order.status not in (
             OrderStatus.OPEN.value, OrderStatus.READY_TO_PAY.value
         ):
-            self.safe.answer_callback(call, "❌ Заказ уже не в этой стадии", True)
+            self.safe.answer_callback(call, "Заказ уже не в этой стадии", True)
             return
         self.assign.confirm_place(order_id, user.id)
-        self.safe.answer_callback(call, "✅ Вы подтвердили, что на месте!", True)
+        self.safe.answer_callback(call, "Вы подтвердили место!", True)
         self.safe.edit(
-            f"✅ Вы на месте!\n💰 Ваша выплата: {order.payout_per_person} ₽",
+            f"Вы на месте!\nВаша выплата: {order.payout_per_person} руб",
             call.message.chat.id, call.message.message_id,
         )
-        # Если все подтвердили и заказ ещё open — переводим в ready_to_pay
         if (order.status == OrderStatus.OPEN.value
                 and self.service.are_all_confirmed(order_id)
                 and self.service.is_fully_staffed(order_id)):
             self.orders.update_status(order_id, OrderStatus.READY_TO_PAY)
             self.safe.send(
                 order.zakazchik_id,
-                f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
-                f"👥 Все работники подтвердили место.\n📍 {order.address}\n"
-                f"📝 {order.work_description}\n💰 {order.total_sum} ₽\n"
-                f"💳 {self.config.sbp_phone}",
+                f"ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n\n"
+                f"Все подтвердили место.\n{order.address}\n"
+                f"{order.work_description}\n{order.total_sum} руб\n"
+                f"{self.config.sbp_phone}",
                 reply_markup=payment_kb(order_id),
             )
             for wid in self.assign.list_user_ids(order_id):
@@ -2201,71 +2084,70 @@ class YurgaBot:
                 if w:
                     self.safe.send(
                         w.telegram_id,
-                        f"🔔 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
-                        f"📍 {order.address}\n📝 {order.work_description}\n"
-                        f"💰 {order.payout_per_person} ₽",
+                        f"ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
+                        f"{order.address}\n{order.work_description}\n"
+                        f"{order.payout_per_person} руб",
                     )
             self._notify_moderators(
-                f"📊 ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
-                f"👤 {order.zakazchik_name}\n📍 {order.address}\n"
-                f"📝 {order.work_description}\n👥 {order.people} чел.\n"
-                f"💰 {order.total_sum} ₽"
+                f"ЗАКАЗ #{order_id} УКОМПЛЕКТОВАН!\n"
+                f"{order.zakazchik_name}\n{order.address}\n"
+                f"{order.work_description}\n{order.people} чел.\n"
+                f"{order.total_sum} руб"
             )
 
     def _cb_cancel_take(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         self.assign.delete(order_id, user.id)
-        self.safe.answer_callback(call, "❌ Отказ от заказа", True)
-        self.safe.edit("❌ Вы отказались от заказа",
+        self.safe.answer_callback(call, "Отказ от заказа", True)
+        self.safe.edit("Вы отказались от заказа",
                        call.message.chat.id, call.message.message_id)
 
     def _cb_i_paid(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.READY_TO_PAY.value:
-            self.safe.answer_callback(call, "❌ Заказ не в статусе оплаты", True)
+            self.safe.answer_callback(call, "Заказ не в статусе оплаты", True)
             return
         if user.id != order.zakazchik_id:
-            self.safe.answer_callback(call, "❌ Это не ваш заказ", True)
+            self.safe.answer_callback(call, "Это не ваш заказ", True)
             return
         self.orders.update_status(order_id, OrderStatus.PAID)
         self.orders.set_paid_at(order_id)
-        self.safe.answer_callback(call, "✅ Оплата подтверждена!", True)
+        self.safe.answer_callback(call, "Оплата подтверждена!", True)
         self.safe.edit(
-            f"✅ Оплата заказа #{order_id} подтверждена!",
+            f"Оплата заказа #{order_id} подтверждена!",
             call.message.chat.id, call.message.message_id,
         )
         self._notify_moderators(
-            f"💰 ЗАКАЗ #{order_id} ОПЛАЧЕН!\n"
-            f"👤 {order.zakazchik_name}\n📍 {order.address}\n"
-            f"📝 {order.work_description}\n💰 {order.total_sum} ₽",
+            f"ЗАКАЗ #{order_id} ОПЛАЧЕН!\n"
+            f"{order.zakazchik_name}\n{order.address}\n"
+            f"{order.work_description}\n{order.total_sum} руб",
         )
-        # Отправляем модератору с кнопкой подтверждения
         for m_id in self.config.moderator_ids:
             self.safe.send(
                 m_id,
-                f"💰 ЗАКАЗ #{order_id} ОПЛАЧЕН!\n"
-                f"👤 {order.zakazchik_name}\n📍 {order.address}\n"
-                f"📝 {order.work_description}\n💰 {order.total_sum} ₽",
+                f"ЗАКАЗ #{order_id} ОПЛАЧЕН!\n"
+                f"{order.zakazchik_name}\n{order.address}\n"
+                f"{order.work_description}\n{order.total_sum} руб",
                 reply_markup=moderator_payment_kb(order_id),
             )
 
     def _cb_confirm_payment(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         if not self._is_moderator(user.telegram_id):
-            self.safe.answer_callback(call, "❌ Нет прав", True)
+            self.safe.answer_callback(call, "Нет прав", True)
             return
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.PAID.value:
-            self.safe.answer_callback(call, "❌ Заказ не в статусе оплаты", True)
+            self.safe.answer_callback(call, "Заказ не в статусе оплаты", True)
             return
         self.orders.update_status(order_id, OrderStatus.WORKING)
         self.users.log_moderator_action(
             user.telegram_id, "confirm_payment", None, f"order={order_id}"
         )
-        self.safe.answer_callback(call, "✅ Оплата подтверждена!", True)
+        self.safe.answer_callback(call, "Оплата подтверждена!", True)
         self.safe.edit(
-            f"✅ Оплата заказа #{order_id} подтверждена!",
+            f"Оплата заказа #{order_id} подтверждена!",
             call.message.chat.id, call.message.message_id,
         )
         for wid in self.assign.list_user_ids(order_id):
@@ -2273,56 +2155,53 @@ class YurgaBot:
             if w:
                 self.safe.send(
                     w.telegram_id,
-                    f"✅ ЗАКАЗ #{order_id} ОПЛАЧЕН!\n📍 {order.address}\n"
-                    f"📝 {order.work_description}\n⏱ {order.hours} ч.\n"
-                    f"📸 После выполнения отправьте фото:",
+                    f"ЗАКАЗ #{order_id} ОПЛАЧЕН!\n{order.address}\n"
+                    f"{order.work_description}\n{order.hours} ч.\n"
+                    f"После выполнения отправьте фото:",
                     reply_markup=worker_photo_kb(order_id),
                 )
         self.safe.send(
             order.zakazchik_id,
-            f"✅ ЗАКАЗ #{order_id} ПОДТВЕРЖДЁН!\n"
-            f"📍 {order.address}\n📝 {order.work_description}\n"
-            f"⏱ {order.hours} ч.",
+            f"ЗАКАЗ #{order_id} ПОДТВЕРЖДЁН!\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.",
         )
 
     def _cb_send_photo(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.WORKING.value:
-            self.safe.answer_callback(call, "❌ Заказ не в статусе работы", True)
+            self.safe.answer_callback(call, "Заказ не в статусе работы", True)
             return
-        self.states.set(user.telegram_id, f"waiting_photo_{order_id}", {},
-                        ttl_minutes=60)
-        self.safe.answer_callback(
-            call, "📸 Отправьте фото выполненной работы", True)
-        self.safe.send(call.message.chat.id,
-                       f"📸 Отправьте фото для заказа #{order_id}")
+        self.states.set(user.telegram_id, f"waiting_photo_{order_id}", {})
+        self.safe.answer_callback(call, "Отправьте фото", True)
+        self.safe.send(call.message.chat.id, f"Отправьте фото для заказа #{order_id}")
 
     def _cb_approve(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.WAITING_APPROVAL.value:
-            self.safe.answer_callback(call, "❌ Заказ не ждёт подтверждения", True)
+            self.safe.answer_callback(call, "Заказ не ждёт подтверждения", True)
             return
         if user.id != order.zakazchik_id:
-            self.safe.answer_callback(call, "❌ Это не ваш заказ", True)
+            self.safe.answer_callback(call, "Это не ваш заказ", True)
             return
         self.orders.update_status(order_id, OrderStatus.WAITING_PAYOUT)
         self.orders.set_completed_at(order_id)
-        self.safe.answer_callback(call, "✅ Работа подтверждена!", True)
-        self.safe.edit(f"✅ Заказ #{order_id} выполнен!",
+        self.safe.answer_callback(call, "Работа подтверждена!", True)
+        self.safe.edit(f"Заказ #{order_id} выполнен!",
                        call.message.chat.id, call.message.message_id)
         self._notify_moderators(
-            f"✅ ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n📍 {order.address}\n"
-            f"📝 {order.work_description}\n💰 {order.total_sum} ₽\n"
-            f"💵 {order.payout_per_person} ₽/чел"
+            f"ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n{order.address}\n"
+            f"{order.work_description}\n{order.total_sum} руб\n"
+            f"{order.payout_per_person} руб/чел"
         )
         for m_id in self.config.moderator_ids:
             self.safe.send(
                 m_id,
-                f"✅ ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n📍 {order.address}\n"
-                f"📝 {order.work_description}\n💰 {order.total_sum} ₽\n"
-                f"💵 {order.payout_per_person} ₽/чел",
+                f"ЗАКАЗ #{order_id} ВЫПОЛНЕН!\n{order.address}\n"
+                f"{order.work_description}\n{order.total_sum} руб\n"
+                f"{order.payout_per_person} руб/чел",
                 reply_markup=moderator_payout_kb(order_id),
             )
         for wid in self.assign.list_user_ids(order_id):
@@ -2330,54 +2209,52 @@ class YurgaBot:
             if w:
                 self.safe.send(
                     w.telegram_id,
-                    f"✅ Заказ #{order_id} одобрен!\n"
-                    f"💵 {order.payout_per_person} ₽",
+                    f"Заказ #{order_id} одобрен!\n{order.payout_per_person} руб",
                 )
 
     def _cb_reject(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.WAITING_APPROVAL.value:
-            self.safe.answer_callback(call, "❌ Заказ не ждёт подтверждения", True)
+            self.safe.answer_callback(call, "Заказ не ждёт подтверждения", True)
             return
         if user.id != order.zakazchik_id:
-            self.safe.answer_callback(call, "❌ Это не ваш заказ", True)
+            self.safe.answer_callback(call, "Это не ваш заказ", True)
             return
-        self.safe.answer_callback(call, "❌ Работа отклонена", True)
-        self.safe.edit(f"❌ Работа по заказу #{order_id} отклонена.",
+        self.safe.answer_callback(call, "Работа отклонена", True)
+        self.safe.edit(f"Работа по заказу #{order_id} отклонена.",
                        call.message.chat.id, call.message.message_id)
         self._notify_moderators(
-            f"❌ ЗАКАЗ #{order_id} ОТКЛОНЁН!\n👤 {order.zakazchik_name}"
+            f"ЗАКАЗ #{order_id} ОТКЛОНЁН!\n{order.zakazchik_name}"
         )
 
     def _cb_confirm_payout(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         if not self._is_moderator(user.telegram_id):
-            self.safe.answer_callback(call, "❌ Нет прав", True)
+            self.safe.answer_callback(call, "Нет прав", True)
             return
         order = self.orders.get(order_id)
         if not order or order.status != OrderStatus.WAITING_PAYOUT.value:
-            self.safe.answer_callback(call, "❌ Заказ не в статусе выплаты", True)
+            self.safe.answer_callback(call, "Заказ не в статусе выплаты", True)
             return
         self.orders.update_status(order_id, OrderStatus.COMPLETED)
         self.users.log_moderator_action(
             user.telegram_id, "confirm_payout", None, f"order={order_id}"
         )
-        self.safe.answer_callback(call, "✅ Выплата подтверждена!", True)
+        self.safe.answer_callback(call, "Выплата подтверждена!", True)
         self.safe.edit(
-            f"✅ Выплата по заказу #{order_id} подтверждена!",
+            f"Выплата по заказу #{order_id} подтверждена!",
             call.message.chat.id, call.message.message_id,
         )
         self.safe.send(order.zakazchik_id,
-                       f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n💰 Работники получили оплату.")
+                       f"ЗАКАЗ #{order_id} ЗАВЕРШЁН!\nРаботники получили оплату.")
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
         for wid in self.assign.list_user_ids(order_id):
             w = self.users.get_by_id(wid)
             if w:
                 self.safe.send(
                     w.telegram_id,
-                    f"✅ ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n"
-                    f"💵 {order.payout_per_person} ₽",
+                    f"ЗАКАЗ #{order_id} ЗАВЕРШЁН!\n{order.payout_per_person} руб",
                 )
                 self.sheets.append_payout({
                     "date": now_str,
@@ -2399,40 +2276,37 @@ class YurgaBot:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.zakazchik_id != user.id:
-            self.safe.answer_callback(call, "❌ Это не ваш заказ", True)
+            self.safe.answer_callback(call, "Это не ваш заказ", True)
             return
         if order.status in (OrderStatus.COMPLETED.value, OrderStatus.CANCELLED.value):
-            self.safe.answer_callback(
-                call, "❌ Этот заказ уже завершён или отменён", True)
+            self.safe.answer_callback(call, "Заказ уже завершён или отменён", True)
             return
         self.orders.update_status(order_id, OrderStatus.CANCELLED)
-        self.safe.answer_callback(call, f"✅ Заказ #{order_id} отменён!", True)
-        self.safe.edit(f"❌ ЗАКАЗ #{order_id} ОТМЕНЁН",
+        self.safe.answer_callback(call, f"Заказ #{order_id} отменён!", True)
+        self.safe.edit(f"ЗАКАЗ #{order_id} ОТМЕНЁН",
                        call.message.chat.id, call.message.message_id)
         for wid in self.assign.list_user_ids(order_id):
             w = self.users.get_by_id(wid)
             if w:
-                self.safe.send(w.telegram_id,
-                               f"❌ Заказ #{order_id} отменён заказчиком.")
+                self.safe.send(w.telegram_id, f"Заказ #{order_id} отменён заказчиком.")
         self.sheets.update_order_status(order_id, "Cancelled")
 
     def _cb_complete(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order or order.zakazchik_id != user.id:
-            self.safe.answer_callback(call, "❌ Это не ваш заказ", True)
+            self.safe.answer_callback(call, "Это не ваш заказ", True)
             return
         if order.status != OrderStatus.WORKING.value:
-            self.safe.answer_callback(call, "❌ Заказ не в работе", True)
+            self.safe.answer_callback(call, "Заказ не в работе", True)
             return
         if not self.service.are_all_photos(order_id):
-            self.safe.answer_callback(
-                call, "❌ Работники ещё не отправили фото.", True)
+            self.safe.answer_callback(call, "Работники ещё не отправили фото.", True)
             return
         self.orders.update_status(order_id, OrderStatus.WAITING_APPROVAL)
-        self.safe.answer_callback(call, "✅ Заказ ожидает подтверждения!", True)
+        self.safe.answer_callback(call, "Заказ ожидает подтверждения!", True)
         self.safe.edit(
-            f"📸 Заказ #{order_id} выполнен!\n✅ Подтвердите качество:",
+            f"Заказ #{order_id} выполнен!\nПодтвердите качество:",
             call.message.chat.id, call.message.message_id,
             reply_markup=approve_kb(order_id),
         )
@@ -2440,12 +2314,11 @@ class YurgaBot:
 
     def _cb_contact_mod(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
-        self.states.set(user.telegram_id, "msg_to_mod",
-                        {"order_id": order_id}, ttl_minutes=60)
-        self.safe.answer_callback(call, "📝 Напишите сообщение")
+        self.states.set(user.telegram_id, "msg_to_mod", {"order_id": order_id})
+        self.safe.answer_callback(call, "Напишите сообщение")
         self.safe.send(
             call.message.chat.id,
-            f"📝 Напишите сообщение модератору по заказу #{order_id}:\n"
+            f"Напишите сообщение модератору по заказу #{order_id}:\n"
             f"(для отмены /cancel)",
         )
 
@@ -2453,23 +2326,21 @@ class YurgaBot:
         order_id = ids[0]
         order = self.orders.get(order_id)
         if not order:
-            self.safe.answer_callback(call, "❌ Заказ не найден", True)
+            self.safe.answer_callback(call, "Заказ не найден", True)
             return
         self.states.set(user.telegram_id, "msg_to_user",
-                        {"target_id": order.zakazchik_id, "order_id": order_id},
-                        ttl_minutes=60)
-        self.safe.answer_callback(call, "📝 Напишите сообщение")
+                        {"target_id": order.zakazchik_id, "order_id": order_id})
+        self.safe.answer_callback(call, "Напишите сообщение")
         self.safe.send(
             call.message.chat.id,
-            f"📝 Напишите сообщение по заказу #{order_id}:\n"
-            f"(для отмены /cancel)",
+            f"Напишите сообщение по заказу #{order_id}:\n(для отмены /cancel)",
         )
 
     def _cb_contact_worker_order(self, call, user: UserDTO, ids: List[int]) -> None:
         order_id = ids[0]
         worker_ids = self.assign.list_user_ids(order_id)
         if not worker_ids:
-            self.safe.answer_callback(call, "❌ Нет работников", True)
+            self.safe.answer_callback(call, "Нет работников", True)
             return
         if len(worker_ids) > 1:
             kb = InlineKeyboardMarkup()
@@ -2477,40 +2348,32 @@ class YurgaBot:
                 w = self.users.get_by_id(wid)
                 if w:
                     kb.add(InlineKeyboardButton(
-                        f"👤 {w.name or 'Работник'}",
+                        f"{w.name or 'Работник'}",
                         callback_data=f"send_msg_{wid}_{order_id}"))
-            self.safe.send(call.message.chat.id,
-                           "👥 Выберите работника:", reply_markup=kb)
+            self.safe.send(call.message.chat.id, "Выберите работника:", reply_markup=kb)
             self.safe.answer_callback(call)
         else:
             self.states.set(user.telegram_id, "msg_to_user",
-                            {"target_id": worker_ids[0], "order_id": order_id},
-                            ttl_minutes=60)
-            self.safe.answer_callback(call, "📝 Напишите сообщение")
+                            {"target_id": worker_ids[0], "order_id": order_id})
+            self.safe.answer_callback(call, "Напишите сообщение")
             self.safe.send(
                 call.message.chat.id,
-                f"📝 Напишите сообщение по заказу #{order_id}:\n"
-                f"(для отмены /cancel)",
+                f"Напишите сообщение по заказу #{order_id}:\n(для отмены /cancel)",
             )
 
     def _cb_send_msg(self, call, user: UserDTO, ids: List[int]) -> None:
         target_id = ids[0]
         order_id = ids[1] if len(ids) > 1 else 0
         self.states.set(user.telegram_id, "msg_to_user",
-                        {"target_id": target_id, "order_id": order_id},
-                        ttl_minutes=60)
-        self.safe.answer_callback(call, "📝 Напишите сообщение")
-        self.safe.send(call.message.chat.id,
-                       "📝 Напишите сообщение:\n(для отмены /cancel)")
+                        {"target_id": target_id, "order_id": order_id})
+        self.safe.answer_callback(call, "Напишите сообщение")
+        self.safe.send(call.message.chat.id, "Напишите сообщение:\n(для отмены /cancel)")
 
-    # ---------------------------------------------------------
-    # ФОТО
-    # ---------------------------------------------------------
     def _on_photo(self, m) -> None:
         uid = m.from_user.id
         state, _ = self.states.get(uid)
         if not state or not state.startswith("waiting_photo_"):
-            self.safe.send(m.chat.id, "❌ Нет активного запроса на фото.")
+            self.safe.send(m.chat.id, "Нет активного запроса на фото.")
             return
         try:
             order_id = int(state.split("_")[2])
@@ -2523,36 +2386,32 @@ class YurgaBot:
             return
         self.assign.set_photo(order_id, user.id, file_id)
         self.states.clear(uid)
-        self.safe.send(m.chat.id, f"✅ Фото для заказа #{order_id} сохранено!")
+        self.safe.send(m.chat.id, f"Фото для заказа #{order_id} сохранено!")
         order = self.orders.get(order_id)
         if order and order.status == OrderStatus.WORKING.value \
                 and self.service.are_all_photos(order_id):
             self.orders.update_status(order_id, OrderStatus.WAITING_APPROVAL)
             self.safe.send(
                 order.zakazchik_id,
-                f"📸 Все работники отправили фото!\n✅ Подтвердите выполнение:",
+                f"Все работники отправили фото!\nПодтвердите выполнение:",
                 reply_markup=approve_kb(order_id),
             )
             self._notify_moderators(
-                f"📸 Все работники отправили фото по заказу #{order_id}!"
+                f"Все работники отправили фото по заказу #{order_id}!"
             )
 
-    # ---------------------------------------------------------
-    # СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЯМ
-    # ---------------------------------------------------------
     def _msg_to_user(self, m, data: Dict) -> None:
         target_id = data.get("target_id")
         order_id = data.get("order_id", 0)
         target = self.users.get_by_id(target_id) if target_id else None
         if not target:
-            self.safe.send(m.chat.id, "❌ Пользователь не найден.")
+            self.safe.send(m.chat.id, "Пользователь не найден.")
             self.states.clear(m.from_user.id)
             return
         order_text = f" по заказу #{order_id}" if order_id else ""
         self.safe.send(
             target.telegram_id,
-            f"📩 НОВОЕ СООБЩЕНИЕ{order_text}\n\n"
-            f"От: {m.from_user.first_name}\n\n{m.text}",
+            f"НОВОЕ СООБЩЕНИЕ{order_text}\n\nОт: {m.from_user.first_name}\n\n{m.text}",
         )
         self.messages_repo.save(
             from_user_id=self.users.get_by_telegram(m.from_user.id).id,
@@ -2560,20 +2419,16 @@ class YurgaBot:
             order_id=order_id or None,
             text=m.text,
         )
-        self.safe.send(m.chat.id, "✅ Сообщение отправлено!")
+        self.safe.send(m.chat.id, "Сообщение отправлено!")
         self.states.clear(m.from_user.id)
 
-    # ---------------------------------------------------------
-    # ЗАПУСК
-    # ---------------------------------------------------------
     def run(self) -> None:
-        self.logger.info("🚀 Бот запущен!")
-        self.logger.info(f"📊 Модераторы: {self.config.moderator_ids}")
-        self.logger.info(f"💳 СБП: {self.config.sbp_phone}")
+        self.logger.info("Бот запущен!")
+        self.logger.info(f"Модераторы: {self.config.moderator_ids}")
+        self.logger.info(f"СБП: {self.config.sbp_phone}")
 
-        # Graceful shutdown
         def _shutdown(*_):
-            self.logger.info("⛔ Получен сигнал завершения")
+            self.logger.info("Получен сигнал завершения")
             self._running = False
             self.bot.stop_polling()
 
@@ -2590,12 +2445,8 @@ class YurgaBot:
                     break
                 self.logger.warning(f"Polling error: {e}. Рестарт через 5 сек.")
                 time.sleep(5)
-        self.logger.info("👋 Бот остановлен корректно.")
+        self.logger.info("Бот остановлен корректно.")
 
-
-# ============================================================
-# ТОЧКА ВХОДА
-# ============================================================
 
 def main() -> int:
     try:
@@ -2609,7 +2460,7 @@ def main() -> int:
         app = YurgaBot(config)
         app.run()
     except KeyboardInterrupt:
-        logger.info("⛔ Keyboard interrupt")
+        logger.info("Keyboard interrupt")
     except Exception as e:
         logger.critical(f"Критическая ошибка: {e}", exc_info=True)
         return 1
