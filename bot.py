@@ -1450,6 +1450,7 @@ class YurgaBot:
         kb.row(KeyboardButton("Другой город"))
         self.states.set(m.from_user.id, "order_city", {})
         self.safe.send(m.chat.id, "Выберите город:", reply_markup=kb)
+        
     def _finish_customer_reg(self, m, data: Dict) -> None:
         uid = m.from_user.id
         user = self.users.get_by_telegram(uid)
