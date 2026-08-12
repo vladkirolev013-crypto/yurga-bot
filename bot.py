@@ -1439,6 +1439,17 @@ class YurgaBot:
             "registered_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
         })
 
+    def _customer_create_start(self, m) -> None:
+    user = self._get_user_or_none(m.from_user.id)
+    if not self._require_not_blocked(user, m.chat.id): return
+    if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
+    if not self._require_registered(user, m.chat.id): return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("Новосибирск"), KeyboardButton("Томск"))
+    kb.row(KeyboardButton("Кемерово"), KeyboardButton("Юрга"))
+    kb.row(KeyboardButton("Другой город"))
+    self.states.set(m.from_user.id, "order_city", {})
+    self.safe.send(m.chat.id, "Выберите город:", reply_markup=kb)
     def _finish_customer_reg(self, m, data: Dict) -> None:
         uid = m.from_user.id
         user = self.users.get_by_telegram(uid)
