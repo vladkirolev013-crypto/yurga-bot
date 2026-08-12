@@ -782,8 +782,6 @@ class MessageRepository:
                 "VALUES (?, ?, ?, ?)",
                 (from_user_id, to_user_id, order_id, text),
             )
-
-
 class SheetsService:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -1330,6 +1328,12 @@ class YurgaBot:
                 self._reg_bank(m, data or {})
             elif state == "reg_initials":
                 self._reg_initials(m, data or {})
+            elif state == "order_city":
+                self._order_city(m, data or {})
+            elif state == "order_city_other":
+                data["city"] = m.text.strip()
+                self.states.set(m.from_user.id, "order_address", data)
+                self.safe.send(m.chat.id, "Введите адрес выполнения работы:")
             elif state == "order_address":
                 self._order_address(m, data or {})
             elif state == "order_description":
@@ -1439,32 +1443,7 @@ class YurgaBot:
             "registered_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
         })
 
-    def _customer_create_start(self, m) -> None:
-        user = self._get_user_or_none(m.from_user.id)
-        if not self._require_not_blocked(user, m.chat.id): return
-        if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
-        if not self._require_registered(user, m.chat.id): return
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.row(KeyboardButton("Новосибирск"), KeyboardButton("Томск"))
-        kb.row(KeyboardButton("Кемерово"), KeyboardButton("Юрга"))
-        kb.row(KeyboardButton("Другой город"))
-        self.states.set(m.from_user.id, "order_city", {})
-        self.safe.send(m.chat.id, "Выберите город:", reply_markup=kb)
-
-        
-.   def _order_city(self, m, data: Dict) -> None:
-        if m.text not in ("Новосибирск", "Томск", "Кемерово", "Юрга", "Другой город"):
-            self.safe.send(m.chat.id, "Выберите город из списка.")
-            return
-        if m.text == "Другой город":
-            self.safe.send(m.chat.id, "Введите название города:")
-            self.states.set(m.from_user.id, "order_city_other", data)
-            return
-        data["city"] = m.text 
-        self.states.set(m.from_user.id, "order_address", data)
-        self.safe.send(m.chat.id, "Введите адрес выполнения работы:")
-   
-   def _finish_customer_reg(self, m, data: Dict) -> None:
+    def _finish_customer_reg(self, m, data: Dict) -> None:
         uid = m.from_user.id
         user = self.users.get_by_telegram(uid)
         if not user:
@@ -1488,6 +1467,115 @@ class YurgaBot:
             "registered_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
         })
 
+    def _customer_create_start(self, m) -> None:
+        user = self._get_user_or_none(m.from_user.id)
+        if not self._require_not_blocked(user, m.chat.id): return
+        if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
+        if not self._require_registered(user, m.chat.id): return
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.row(KeyboardButton("Новосибирск"), KeyboardButton("Томск"))
+        kb.row(KeyboardButton("Кемерово"), KeyboardButton("Юрга"))
+        kb.row(KeyboardButton("Другой город"))
+        self.states.set(m.from_user.id, "order_city", {})
+        self.safe.send(m.chat.id, "Выберите город:", reply_markup=kb)
+
+    def _order_city(self, m, data: Dict) -> None:
+        if m.text not in ("Новосибирск", "Томск", "Кемерово", "Юрга", "Другой город"):
+            self.safe.send(m.chat.id, "Выберите город из списка.")
+            return
+        if m.text == "Другой город":
+            self.safe.send(m.chat.id, "Введите название города:")
+            self.states.set(m.from_user.id, "order_city_other", data)
+            return
+        data["city"] = m.text
+        self.states.set(m.from_user.id, "order_address", data)
+        self.safe.send(m.chat.id, "Введите адрес выполнения работы:")
+
+    def _order_address(self, m, data: Dict) -> None:
+        if not m.text or len(m.text.strip()) < 5:
+            self.safe.send(m.chat.id, "Слишком короткий адрес.")
+            return
+        data["address"] = f"{data.get('city', '')}, {m.text.strip()}"
+        self.states.set(m.from_user.id, "order_description", data)
+        self.safe.send(m.chat.id, "Введите описание работы (что нужно сделать):")
+
+    def _order_description(self, m, data: Dict) -> None:
+        if not m.text or len(m.text.strip()) < 3:
+            self.safe.send(m.chat.id, "Слишком короткое описание.")
+            return
+        data["work_description"] = m.text.strip()
+        self.states.set(m.from_user.id, "order_hours", data)
+        self.safe.send(m.chat.id, "Введите количество часов (число):")
+
+    def _order_hours(self, m, data: Dict) -> None:
+        n = validate_positive_int(m.text, 24)
+        if n is None:
+            self.safe.send(m.chat.id, "Введите целое число от 1 до 24.")
+            return
+        data["hours"] = n
+        self.states.set(m.from_user.id, "order_people", data)
+        self.safe.send(m.chat.id, "Введите количество человек:")
+
+    def _order_people(self, m, data: Dict) -> None:
+        n = validate_positive_int(m.text, 50)
+        if n is None:
+            self.safe.send(m.chat.id, "Введите целое число от 1 до 50.")
+            return
+        user = self.users.get_by_telegram(m.from_user.id)
+        if not user:
+            self.safe.send(m.chat.id, "Пользователь не найден.")
+            self.states.clear(m.from_user.id)
+            return
+        order = self.orders.create(
+            customer=user,
+            address=data["address"],
+            description=data["work_description"],
+            hours=data["hours"],
+            people=n,
+            price_per_hour=self.config.price_per_hour,
+            commission_per_hour=self.config.commission_per_hour,
+        )
+        self.states.clear(m.from_user.id)
+        self.safe.send(
+            m.chat.id,
+            f"ЗАКАЗ #{order.id} СОЗДАН!\n\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.  {order.people} чел.\n"
+            f"{order.total_sum} руб",
+            reply_markup=customer_kb(),
+        )
+        self.sheets.append_order({
+            "id": order.id,
+            "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
+            "zakazchik_name": order.zakazchik_name,
+            "phone": user.phone or "не указан",
+            "address": order.address,
+            "work_description": order.work_description,
+            "hours": order.hours,
+            "people": order.people,
+            "total_sum": order.total_sum,
+            "commission": order.commission,
+            "payout_per_person": order.payout_per_person,
+            "status": "Open",
+        })
+        self._notify_workers(
+            f"НОВЫЙ ЗАКАЗ!\n#{order.id}\n{order.payout_per_person} руб\n"
+            f"{order.address}\n{order.work_description}\n"
+            f"{order.hours} ч.  {order.people} чел."
+        )
+        self._notify_moderators(
+            f"НОВЫЙ ЗАКАЗ #{order.id}\n\n"
+            f"{order.zakazchik_name}\n{order.address}\n"
+            f"{order.work_description}\n{order.hours} ч.  "
+            f"{order.people} чел.\n{order.total_sum} руб"
+        )
+
+    def _customer_complain(self, m) -> None:
+        user = self._get_user_or_none(m.from_user.id)
+        if not self._require_not_blocked(user, m.chat.id): return
+        if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
+        self.states.set(m.from_user.id, "msg_to_mod", {"complaint": True})
+        self.safe.send(m.chat.id, "Опишите жалобу:\n(для отмены /cancel)")
     def _worker_toggle_shift(self, m) -> None:
         user = self._get_user_or_none(m.from_user.id)
         if not self._require_not_blocked(user, m.chat.id):
@@ -1649,100 +1737,6 @@ class YurgaBot:
             f"({user.name or 'без имени'}) просит связи."
         )
         self.safe.send(m.chat.id, "Запрос отправлен модератору.")
-
-    def _customer_create_start(self, m) -> None:
-        user = self._get_user_or_none(m.from_user.id)
-        if not self._require_not_blocked(user, m.chat.id): return
-        if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
-        if not self._require_registered(user, m.chat.id): return
-        self.states.set(m.from_user.id, "order_address", {})
-        self.safe.send(m.chat.id, "Введите адрес выполнения работы:")
-
-    def _order_address(self, m, data: Dict) -> None:
-        if not m.text or len(m.text.strip()) < 5:
-            self.safe.send(m.chat.id, "Слишком короткий адрес.")
-            return
-        data["address"] = m.text.strip()
-        self.states.set(m.from_user.id, "order_description", data)
-        self.safe.send(m.chat.id, "Введите описание работы (что нужно сделать):")
-
-    def _order_description(self, m, data: Dict) -> None:
-        if not m.text or len(m.text.strip()) < 3:
-            self.safe.send(m.chat.id, "Слишком короткое описание.")
-            return
-        data["work_description"] = m.text.strip()
-        self.states.set(m.from_user.id, "order_hours", data)
-        self.safe.send(m.chat.id, "Введите количество часов (число):")
-
-    def _order_hours(self, m, data: Dict) -> None:
-        n = validate_positive_int(m.text, 24)
-        if n is None:
-            self.safe.send(m.chat.id, "Введите целое число от 1 до 24.")
-            return
-        data["hours"] = n
-        self.states.set(m.from_user.id, "order_people", data)
-        self.safe.send(m.chat.id, "Введите количество человек:")
-
-    def _order_people(self, m, data: Dict) -> None:
-        n = validate_positive_int(m.text, 50)
-        if n is None:
-            self.safe.send(m.chat.id, "Введите целое число от 1 до 50.")
-            return
-        user = self.users.get_by_telegram(m.from_user.id)
-        if not user:
-            self.safe.send(m.chat.id, "Пользователь не найден.")
-            self.states.clear(m.from_user.id)
-            return
-        order = self.orders.create(
-            customer=user,
-            address=data["address"],
-            description=data["work_description"],
-            hours=data["hours"],
-            people=n,
-            price_per_hour=self.config.price_per_hour,
-            commission_per_hour=self.config.commission_per_hour,
-        )
-        self.states.clear(m.from_user.id)
-        self.safe.send(
-            m.chat.id,
-            f"ЗАКАЗ #{order.id} СОЗДАН!\n\n"
-            f"{order.address}\n{order.work_description}\n"
-            f"{order.hours} ч.  {order.people} чел.\n"
-            f"{order.total_sum} руб",
-            reply_markup=customer_kb(),
-        )
-        self.sheets.append_order({
-            "id": order.id,
-            "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-            "zakazchik_name": order.zakazchik_name,
-            "phone": user.phone or "не указан",
-            "address": order.address,
-            "work_description": order.work_description,
-            "hours": order.hours,
-            "people": order.people,
-            "total_sum": order.total_sum,
-            "commission": order.commission,
-            "payout_per_person": order.payout_per_person,
-            "status": "Open",
-        })
-        self._notify_workers(
-            f"НОВЫЙ ЗАКАЗ!\n#{order.id}\n{order.payout_per_person} руб\n"
-            f"{order.address}\n{order.work_description}\n"
-            f"{order.hours} ч.  {order.people} чел."
-        )
-        self._notify_moderators(
-            f"НОВЫЙ ЗАКАЗ #{order.id}\n\n"
-            f"{order.zakazchik_name}\n{order.address}\n"
-            f"{order.work_description}\n{order.hours} ч.  "
-            f"{order.people} чел.\n{order.total_sum} руб"
-        )
-
-    def _customer_complain(self, m) -> None:
-        user = self._get_user_or_none(m.from_user.id)
-        if not self._require_not_blocked(user, m.chat.id): return
-        if not self._require_role(user, Role.CUSTOMER, m.chat.id): return
-        self.states.set(m.from_user.id, "msg_to_mod", {"complaint": True})
-        self.safe.send(m.chat.id, "Опишите жалобу:\n(для отмены /cancel)")
 
     def _on_mod_command(self, m) -> None:
         uid = m.from_user.id
@@ -2498,4 +2492,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-        
